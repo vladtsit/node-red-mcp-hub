@@ -1,15 +1,17 @@
 # Node-RED MCP Hub
 
-Secure multi-server MCP gateway for managing Node-RED flows, packaged as a Home Assistant app.
+A small Home Assistant app wrapping multiple Node-RED Admin APIs through one MCP endpoint.
 
-Status: architecture and developer handoff complete; application implementation has not started.
+HTTP port **51844** references Morse's 1844 Washington–Baltimore telegraph demonstration. [Library of Congress](https://www.loc.gov/item/mcc00054/)
 
-- [Architecture and configuration contract](BUILDING_A_MULTI_NODE_RED_MCP_HOME_ASSISTANT_APP.md)
-- [Developer milestones and acceptance tests](DEVELOPER_GUIDE.md)
-- [Architecture review and decisions](ARCHITECTURE_REVIEW.md)
+Planned URL: http://192.168.3.57:51844/private_<secret>, with URL-only access for trusted LAN clients.
 
-Planned endpoint: `http://192.168.3.57:1899/private_<secret>`, using private-URL-only access for trusted LAN clients. No bearer header is required. Configure a fresh secret during installation.
+- [Simple architecture and API tool mapping](BUILDING_A_MULTI_NODE_RED_MCP_HOME_ASSISTANT_APP.md)
+- [Developer instructions](DEVELOPER_GUIDE.md)
+- [What was simplified](ARCHITECTURE_REVIEW.md)
 
-App slug: `node_red_mcp_hub`. Repository: `home-assistant-node-red-mcp-hub`. Image: `ghcr.io/<username>/node-red-mcp-hub`.
+No database, flow history or approval workflow. Node-RED owns the flows; the hub forwards requests.
 
-Start implementation with milestone M0, followed by the read-only alpha in M1.
+Slug: node_red_mcp_hub. Repository: home-assistant-node-red-mcp-hub. Image: ghcr.io/<username>/node-red-mcp-hub.
+
+Status: design complete; implementation has not started.
