@@ -2,8 +2,6 @@ name: Node-RED MCP Hub
 slug: node_red_mcp_hub
 description: Secure multi-server MCP gateway for managing Node-RED flows
 version: 0.1.0
-image: ghcr.io/<username>/node-red-mcp-hub
-url: https://github.com/<username>/home-assistant-node-red-mcp-hub
 arch:
   - amd64
   - aarch64

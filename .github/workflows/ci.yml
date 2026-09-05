@@ -9,14 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: gateway
+        working-directory: node_red_mcp_hub/gateway
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: gateway/package-lock.json
+          cache-dependency-path: node_red_mcp_hub/gateway/package-lock.json
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
@@ -30,5 +30,15 @@ jobs:
         arch: [amd64, aarch64]
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - run: docker buildx build --platform linux/${{ matrix.arch }} --build-arg BUILD_ARCH=${{ matrix.arch }} -f node_red_mcp_hub/Dockerfile . --load
+      - run: docker buildx build --platform linux/${{ matrix.arch }} --build-arg BUILD_ARCH=${{ matrix.arch }} -t node-red-mcp-hub:${{ matrix.arch }} -f node_red_mcp_hub/Dockerfile node_red_mcp_hub --load
+      - name: Start app and check watchdog
+        run: |
+          docker run --rm --detach --name node-red-mcp-hub-smoke --publish 51844:51844 --mount type=bind,src="$GITHUB_WORKSPACE/node_red_mcp_hub/test/options.json",dst=/data/options.json,readonly node-red-mcp-hub:${{ matrix.arch }}
+          for attempt in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:51844/healthz; then exit 0; fi
+            sleep 1
+          done
+          docker logs node-red-mcp-hub-smoke
+          exit 1

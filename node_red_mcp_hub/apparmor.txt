@@ -3,11 +3,29 @@
 #include <tunables/global>
 profile node_red_mcp_hub flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
+
+  file,
+  signal (send) set=(kill,term,int,hup,cont),
   network inet stream,
   network inet6 stream,
+  capability chown,
   capability setuid,
   capability setgid,
+
+  # S6 Overlay and Bashio required by the Home Assistant base image.
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
+  /usr/lib/bashio/** ix,
+  /run.sh ix,
+  /run/{s6,s6-rc*,service}/** ix,
+  /package/** ix,
+  /command/** ix,
+  /etc/services.d/** rwix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
+  /run/{,**} rwk,
+  /tmp/** rwk,
   /app/** rix,
   /data/options.json r,
-  /run/node-red-mcp-hub/** rw,
 }

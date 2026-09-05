@@ -22,8 +22,42 @@ function safeJson(value: unknown): unknown {
   ]));
 }
 
+function redactKnownCredentials(value: unknown): { value: unknown; changed: boolean } {
+  if (Array.isArray(value)) {
+    const values = value.map(redactKnownCredentials);
+    return { value: values.map((item) => item.value), changed: values.some((item) => item.changed) };
+  }
+  if (!value || typeof value !== "object") return { value, changed: false };
+  let changed = false;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key.toLowerCase() === "credentials") {
+      output[key] = "[redacted]";
+      changed = true;
+    } else {
+      const child = redactKnownCredentials(item);
+      output[key] = child.value;
+      changed ||= child.changed;
+    }
+  }
+  return { value: output, changed };
+}
+
+function safeFlowRead(value: unknown): unknown {
+  const redacted = redactKnownCredentials(value);
+  return redacted.changed
+    ? { data: redacted.value, redacted_credentials: true, suitable_for_unchanged_round_trip: false }
+    : value;
+}
+
+function flowPathSegment(id: string): string {
+  if (id === "." || id === "..") throw new UpstreamError("Invalid flow ID");
+  return encodeURIComponent(id);
+}
+
 export class NodeRedClient {
   #token?: CachedToken;
+  #tokenRefresh?: Promise<string>;
 
   constructor(readonly target: TargetConfig) {}
 
@@ -34,18 +68,23 @@ export class NodeRedClient {
 
   private async getCredentialsToken(): Promise<string> {
     if (this.#token && this.#token.expiresAt > Date.now() + 30_000) return this.#token.value;
-    const form = new URLSearchParams({
-      grant_type: "password", client_id: "node-red-admin", scope: "*",
-      username: this.target.username!, password: this.target.password!,
-    });
-    const response = await this.raw("/auth/token", {
-      method: "POST", body: form.toString(), headers: { "content-type": "application/x-www-form-urlencoded" }, skipAuth: true,
-    });
-    const payload = response.json as { access_token?: unknown; expires_in?: unknown } | undefined;
-    if (!payload || typeof payload.access_token !== "string") throw new UpstreamError("Node-RED authentication returned no access token");
-    const seconds = typeof payload.expires_in === "number" ? payload.expires_in : 300;
-    this.#token = { value: payload.access_token, expiresAt: Date.now() + Math.max(1, seconds) * 1000 };
-    return this.#token.value;
+    if (this.#tokenRefresh) return this.#tokenRefresh;
+    this.#tokenRefresh = (async () => {
+      const form = new URLSearchParams({
+        grant_type: "password", client_id: "node-red-admin", scope: "*",
+        username: this.target.username!, password: this.target.password!,
+      });
+      const response = await this.raw("/auth/token", {
+        method: "POST", body: form.toString(), headers: { "content-type": "application/x-www-form-urlencoded" }, skipAuth: true,
+      });
+      const payload = response.json as { access_token?: unknown; expires_in?: unknown } | undefined;
+      if (!payload || typeof payload.access_token !== "string") throw new UpstreamError("Node-RED authentication returned no access token");
+      const seconds = typeof payload.expires_in === "number" ? payload.expires_in : 300;
+      this.#token = { value: payload.access_token, expiresAt: Date.now() + Math.max(1, seconds) * 1000 };
+      return this.#token.value;
+    })();
+    try { return await this.#tokenRefresh; }
+    finally { this.#tokenRefresh = undefined; }
   }
 
   private async authHeader(): Promise<string | undefined> {
@@ -59,7 +98,10 @@ export class NodeRedClient {
 
   private async readBody(response: Response): Promise<string> {
     const length = Number(response.headers.get("content-length") ?? "0");
-    if (Number.isFinite(length) && length > MAX_BODY_BYTES) throw new UpstreamError("Node-RED response exceeds size limit");
+    if (Number.isFinite(length) && length > MAX_BODY_BYTES) {
+      void response.body?.cancel().catch(() => {});
+      throw new UpstreamError("Node-RED response exceeds size limit");
+    }
     if (!response.body) return "";
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -88,21 +130,30 @@ export class NodeRedClient {
         method: options.method, body: options.body, redirect: "error", signal: controller.signal,
         headers: { accept: "application/json", ...(authorization ? { authorization } : {}), ...options.headers },
       });
-      const body = await this.readBody(response);
-      if (response.status === 401 && this.target.authMode === "credentials" && !options.skipAuth && !options.write && allowReadAuthRefresh) {
+      if (response.status === 401 && this.target.authMode === "credentials" && !options.skipAuth) {
         this.#token = undefined;
-        return this.raw(path, options, false);
+        if (!options.write && allowReadAuthRefresh) {
+          await response.body?.cancel();
+          return this.raw(path, options, false);
+        }
       }
       if (!response.ok) {
         // Upstream response bodies can contain target details or flow content.
         // Keep errors useful but never reflect untrusted upstream text to MCP.
+        void response.body?.cancel().catch(() => {});
         throw new UpstreamError(`Node-RED returned HTTP ${response.status}`, response.status);
       }
+      const body = await this.readBody(response);
       if (!body) return { json: undefined, empty: true };
       try { return { json: JSON.parse(body), empty: false }; }
       catch { throw new UpstreamError("Node-RED returned an invalid JSON response"); }
     } catch (error) {
-      if (error instanceof UpstreamError) throw error;
+      if (error instanceof UpstreamError) {
+        if (options.write && error.status === undefined && !error.outcomeUnknown) {
+          throw new UpstreamError("Node-RED write response was invalid; outcome is unknown", undefined, true);
+        }
+        throw error;
+      }
       const uncertain = options.write === true;
       if (error instanceof Error && error.name === "AbortError") {
         throw new UpstreamError(uncertain ? "Node-RED write timed out; outcome is unknown" : "Node-RED request timed out", undefined, uncertain);
@@ -119,11 +170,11 @@ export class NodeRedClient {
     return result.empty ? { ok: true } : result.json;
   }
 
-  getFlows() { return this.request("/flows", "GET", undefined, { "Node-RED-API-Version": "v2" }); }
-  getFlow(id: string) { return this.request(`/flow/${encodeURIComponent(id)}`); }
+  async getFlows() { return safeFlowRead(await this.request("/flows", "GET", undefined, { "Node-RED-API-Version": "v2" })); }
+  async getFlow(id: string) { return safeFlowRead(await this.request(`/flow/${flowPathSegment(id)}`)); }
   createFlow(flow: unknown) { return this.request("/flow", "POST", flow, undefined, true); }
-  updateFlow(id: string, flow: unknown) { return this.request(`/flow/${encodeURIComponent(id)}`, "PUT", flow, undefined, true); }
-  deleteFlow(id: string) { return this.request(`/flow/${encodeURIComponent(id)}`, "DELETE", undefined, undefined, true); }
+  updateFlow(id: string, flow: unknown) { return this.request(`/flow/${flowPathSegment(id)}`, "PUT", flow, undefined, true); }
+  deleteFlow(id: string) { return this.request(`/flow/${flowPathSegment(id)}`, "DELETE", undefined, undefined, true); }
   deployFlows(flows: unknown, rev: string, deploymentType: "nodes" | "flows" | "full") {
     return this.request("/flows", "POST", { flows, rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": deploymentType }, true);
   }

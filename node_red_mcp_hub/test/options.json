@@ -1,0 +1,13 @@
+{
+  "mcp_path_secret": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "read_only": true,
+  "servers": [
+    {
+      "id": "fixture",
+      "name": "Fixture",
+      "url": "http://127.0.0.1:1880",
+      "auth_mode": "none",
+      "read_only": true
+    }
+  ]
+}

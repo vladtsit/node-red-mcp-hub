@@ -6,7 +6,8 @@ credentials, and write tools take effect immediately.
 
 ## Install and configure
 
-1. Install the add-on on Home Assistant OS and leave its internal port at
+1. Add this repository to Home Assistant as a local or Git repository, then
+   install the app. The repository build creates the image locally. Leave its internal port at
    `51844`. If the host port is occupied, change only the host mapping in the
    add-on's Network options.
 2. Generate a path secret locally, for example `openssl rand -hex 32`, and put
@@ -83,5 +84,6 @@ Assistant backups for backup and restore.
   20 in-flight call limit, TLS certificate verification, and disabled redirects.
 - It uses no database and persists no target tokens. Add-on logs intentionally
   omit private URLs, headers, option secrets, and flow bodies.
-- This package is tested with Node.js 20+ and MCP SDK 1.24.3. Build both `amd64`
-  and `aarch64` images before publishing a release.
+- This package is tested with Node.js 20+ and MCP SDK 1.30.0. Build both `amd64`
+  and `aarch64` images before publishing a release. To publish it to GHCR, set
+  the real repository owner in the image and repository metadata first.

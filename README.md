@@ -12,7 +12,7 @@ Planned URL: http://192.168.3.57:51844/private_<secret>, with URL-only access fo
 
 No database, flow history or approval workflow. Node-RED owns the flows; the hub forwards requests.
 
-Slug: node_red_mcp_hub. Repository: home-assistant-node-red-mcp-hub. Image: ghcr.io/<username>/node-red-mcp-hub.
+Slug: node_red_mcp_hub. Repository: home-assistant-node-red-mcp-hub. Configure the final GHCR image name when publishing.
 
 Status: implementation complete. The Home Assistant add-on, strict TypeScript
 gateway, focused integration tests, and CI workflow are included. See the

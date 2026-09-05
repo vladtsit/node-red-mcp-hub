@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { connect } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { parseConfig } from "../src/config.js";
@@ -21,6 +22,29 @@ async function mcp(base: string, secret: string) {
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/private_${secret}`)));
   return client;
 }
+
+async function rawRequest(port: number, request: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => socket.write(request));
+    socket.setEncoding("utf8");
+    let response = "";
+    socket.on("data", (chunk) => { response += chunk; });
+    socket.on("end", () => resolve(response));
+    socket.on("error", reject);
+  });
+}
+
+test("malformed request targets return 400 without crashing the gateway", async (t) => {
+  const gateway = await start(createGateway(parseConfig({
+    mcp_path_secret: "e".repeat(64), read_only: true,
+    servers: [{ id: "target", name: "Target", url: "http://127.0.0.1:1", auth_mode: "none", read_only: false }],
+  })));
+  t.after(gateway.close);
+  const port = Number(new URL(gateway.url).port);
+  const response = await rawRequest(port, "GET http://[ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+  assert.match(response, /^HTTP\/1\.1 400 /);
+  assert.equal((await fetch(`${gateway.url}/healthz`)).status, 200);
+});
 
 test("actual MCP client initializes, discovers, and routes simultaneous target reads", async (t) => {
   const targets = await Promise.all(["one", "two"].map(async (label) => start(createServer((request, response) => {
@@ -83,4 +107,88 @@ test("native writes preserve payloads and expose Node-RED revision conflicts", a
   assert.deepEqual(seen[0], { method: "PUT", path: "/flow/tab-1", body: flow, deployment: undefined });
   await assert.rejects(() => client.deployFlows([], "old-rev", "flows"), (error: unknown) => error instanceof UpstreamError && error.status === 409);
   assert.deepEqual(seen[1], { method: "POST", path: "/flows", body: { flows: [], rev: "old-rev" }, deployment: "flows" });
+});
+
+test("credentials are cached, known credential fields are redacted, and invalid write replies are uncertain", async (t) => {
+  let tokenRequests = 0;
+  let flowRequests = 0;
+  const target = await start(createServer((request, response) => {
+    if (request.url === "/auth/token") {
+      tokenRequests += 1;
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ access_token: "fixture", expires_in: 3600 }));
+      return;
+    }
+    if (request.url === "/flows") {
+      flowRequests += 1;
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: [{ id: "x", credentials: { password: "never-return" } }] }));
+      return;
+    }
+    if (request.url === "/flow") {
+      response.writeHead(200, { "content-type": "application/json" }).end("not-json");
+      return;
+    }
+    response.writeHead(404).end();
+  }));
+  t.after(target.close);
+  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "credentials", username: "u", password: "p", readOnly: false });
+  const reads = await Promise.all(Array.from({ length: 12 }, () => client.getFlows()));
+  assert.equal(tokenRequests, 1);
+  assert.equal(flowRequests, 12);
+  assert.equal((reads[0] as { redacted_credentials: boolean }).redacted_credentials, true);
+  await assert.rejects(() => client.getFlow(".."), /Invalid flow ID/);
+  await assert.rejects(() => client.createFlow({ id: "write" }), (error: unknown) => error instanceof UpstreamError && error.outcomeUnknown);
+});
+
+test("a rejected credential-mode write clears its token without being replayed", async (t) => {
+  let tokenRequests = 0;
+  let writes = 0;
+  const target = await start(createServer((request, response) => {
+    if (request.url === "/auth/token") {
+      tokenRequests += 1;
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ access_token: `fixture-${tokenRequests}`, expires_in: 3600 }));
+      return;
+    }
+    if (request.url === "/flow") {
+      writes += 1;
+      response.writeHead(401).end();
+      return;
+    }
+    response.writeHead(404).end();
+  }));
+  t.after(target.close);
+  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "credentials", username: "u", password: "p", readOnly: false });
+  await assert.rejects(() => client.createFlow({ id: "one" }), (error: unknown) => error instanceof UpstreamError && error.status === 401);
+  await assert.rejects(() => client.createFlow({ id: "two" }), (error: unknown) => error instanceof UpstreamError && error.status === 401);
+  assert.equal(tokenRequests, 2);
+  assert.equal(writes, 2);
+});
+
+test("gateway permits at most twenty simultaneous upstream calls", async (t) => {
+  let active = 0;
+  let peak = 0;
+  const target = await start(createServer((_request, response) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    setTimeout(() => {
+      active -= 1;
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: [] }));
+    }, 50);
+  }));
+  t.after(target.close);
+  const secret = "d".repeat(64);
+  const gateway = await start(createGateway(parseConfig({
+    mcp_path_secret: secret, read_only: true,
+    servers: [{ id: "target", name: "Target", url: target.url, auth_mode: "none", read_only: false }],
+  })));
+  t.after(gateway.close);
+  const clients: Client[] = [];
+  for (let index = 0; index < 30; index += 1) clients.push(await mcp(gateway.url, secret));
+  t.after(() => Promise.all(clients.map((client) => client.close())));
+  const responses = await Promise.allSettled(
+    clients.map((client) => client.callTool({ name: "get_flows", arguments: { server_id: "target" } })),
+  );
+  assert.equal(peak, 20);
+  const rejected = responses.filter((response) => response.status === "rejected").length;
+  const busyResults = responses.filter((response) => response.status === "fulfilled" && response.value.isError && (response.value.content as { text: string }[])[0].text.includes("Gateway is busy")).length;
+  assert.equal(rejected + busyResults, 10);
 });

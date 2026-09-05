@@ -1,5 +1,5 @@
-gateway/node_modules/
-gateway/dist/
-gateway/test-dist/
-gateway/.npm-cache/
+node_red_mcp_hub/gateway/node_modules/
+node_red_mcp_hub/gateway/dist/
+node_red_mcp_hub/gateway/test-dist/
+node_red_mcp_hub/gateway/.npm-cache/
 *.log

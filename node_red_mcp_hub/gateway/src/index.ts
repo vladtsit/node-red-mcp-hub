@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { MAX_BODY_BYTES, MAX_IN_FLIGHT, PORT, loadConfig, type GatewayConfig } from "./config.js";
-import { registerTools } from "./tools.js";
+import { GatewayRuntime, registerTools } from "./tools.js";
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -32,16 +32,19 @@ async function parseJson(request: IncomingMessage): Promise<unknown> {
   catch { throw new Error("invalid_json"); }
 }
 
-function createMcpServer(config: GatewayConfig): McpServer {
+function createMcpServer(config: GatewayConfig, runtime: GatewayRuntime): McpServer {
   const mcp = new McpServer({ name: "node-red-mcp-hub", version: "0.1.0" });
-  registerTools(mcp, config);
+  registerTools(mcp, config, runtime);
   return mcp;
 }
 
 export function createGateway(config: GatewayConfig) {
+  const runtime = new GatewayRuntime(config);
   let inFlight = 0;
   return createServer(async (request, response) => {
-    const url = new URL(request.url ?? "/", "http://gateway.invalid");
+    let url: URL;
+    try { url = new URL(request.url ?? "/", "http://gateway.invalid"); }
+    catch { return json(response, 400, { error: "invalid_request_target" }); }
     if (url.pathname === "/healthz") {
       if (request.method !== "GET") return json(response, 405, { error: "method_not_allowed" });
       return json(response, 200, { status: "ok" });
@@ -54,9 +57,18 @@ export function createGateway(config: GatewayConfig) {
     inFlight += 1;
     try {
       const body = await parseJson(request);
-      const mcp = createMcpServer(config);
+      const mcp = createMcpServer(config, runtime);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-      response.once("finish", () => { void transport.close(); void mcp.close(); });
+      let cleanedUp = false;
+      const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        void transport.close();
+        void mcp.close();
+      };
+      response.once("finish", cleanup);
+      response.once("close", cleanup);
+      request.once("aborted", cleanup);
       await mcp.connect(transport);
       await transport.handleRequest(request, response, body);
     } catch (caught) {

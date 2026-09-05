@@ -1,10 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { GatewayConfig } from "./config.js";
+import { MAX_IN_FLIGHT, type GatewayConfig } from "./config.js";
 import { NodeRedClient, UpstreamError } from "./node-red.js";
 
 const serverId = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
-const flowId = z.string().min(1).max(256);
+const flowId = z.string().min(1).max(256).refine((id) => id !== "." && id !== "..", "flow_id must not be a dot segment");
 const deploymentType = z.enum(["nodes", "flows", "full"]).default("flows");
 
 function result(value: unknown) {
@@ -20,8 +20,25 @@ function error(message: string, status?: number, outcomeUnknown = false) {
 
 type Action = (client: NodeRedClient) => Promise<unknown> | unknown;
 
-export function registerTools(server: McpServer, config: GatewayConfig): void {
-  const clients = new Map([...config.servers.entries()].map(([id, target]) => [id, new NodeRedClient(target)]));
+class GatewayBusyError extends Error {}
+
+export class GatewayRuntime {
+  readonly clients: Map<string, NodeRedClient>;
+  #active = 0;
+
+  constructor(config: GatewayConfig) {
+    this.clients = new Map([...config.servers.entries()].map(([id, target]) => [id, new NodeRedClient(target)]));
+  }
+
+  async run<T>(action: () => Promise<T> | T): Promise<T> {
+    if (this.#active >= MAX_IN_FLIGHT) throw new GatewayBusyError();
+    this.#active += 1;
+    try { return await action(); }
+    finally { this.#active -= 1; }
+  }
+}
+
+export function registerTools(server: McpServer, config: GatewayConfig, runtime: GatewayRuntime): void {
   // The SDK's public tool overloads deliberately infer complete JSON schemas.
   // Keep that expensive inference at this boundary; Zod still validates every
   // input at runtime and handlers are otherwise ordinary strict TypeScript.
@@ -35,8 +52,9 @@ export function registerTools(server: McpServer, config: GatewayConfig): void {
     const target = config.servers.get(id);
     if (!target) return error("Unknown server_id");
     if (write && (config.readOnly || target.readOnly)) return error("Writes are disabled by read_only configuration");
-    try { return result(await action(clients.get(id)!)); }
+    try { return result(await runtime.run(() => action(runtime.clients.get(id)!))); }
     catch (caught) {
+      if (caught instanceof GatewayBusyError) return error("Gateway is busy; retry later");
       if (caught instanceof UpstreamError) return error(caught.message, caught.status, caught.outcomeUnknown);
       return error("Unexpected gateway error");
     }
