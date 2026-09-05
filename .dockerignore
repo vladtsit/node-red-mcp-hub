@@ -1,0 +1,6 @@
+.git
+.github
+gateway/node_modules
+gateway/dist
+gateway/test-dist
+gateway/.npm-cache

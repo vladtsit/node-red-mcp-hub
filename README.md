@@ -14,4 +14,7 @@ No database, flow history or approval workflow. Node-RED owns the flows; the hub
 
 Slug: node_red_mcp_hub. Repository: home-assistant-node-red-mcp-hub. Image: ghcr.io/<username>/node-red-mcp-hub.
 
-Status: design complete; implementation has not started.
+Status: implementation complete. The Home Assistant add-on, strict TypeScript
+gateway, focused integration tests, and CI workflow are included. See the
+[add-on documentation](node_red_mcp_hub/DOCS.md) for installation and client
+configuration.

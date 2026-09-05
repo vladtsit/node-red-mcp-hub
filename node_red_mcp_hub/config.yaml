@@ -1,0 +1,34 @@
+name: Node-RED MCP Hub
+slug: node_red_mcp_hub
+description: Secure multi-server MCP gateway for managing Node-RED flows
+version: 0.1.0
+image: ghcr.io/<username>/node-red-mcp-hub
+url: https://github.com/<username>/home-assistant-node-red-mcp-hub
+arch:
+  - amd64
+  - aarch64
+startup: services
+boot: auto
+init: false
+ports:
+  # 51844 references Morse's 1844 Washington–Baltimore telegraph demonstration.
+  51844/tcp: 51844
+ports_description:
+  51844/tcp: MCP HTTP endpoint
+watchdog: http://[HOST]:[PORT:51844]/healthz
+options:
+  mcp_path_secret: null
+  read_only: true
+  servers: []
+schema:
+  mcp_path_secret: password
+  read_only: bool
+  servers:
+    - id: str
+      name: str
+      url: url
+      auth_mode: list(credentials|bearer|basic|none)
+      username: str?
+      password: password?
+      token: password?
+      read_only: bool?

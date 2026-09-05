@@ -1,0 +1,21 @@
+{
+  "name": "node-red-mcp-hub-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test test-dist/test/**/*.test.js",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.24.3",
+    "zod": "3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.2",
+    "typescript": "5.8.3"
+  }
+}
