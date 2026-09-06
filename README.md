@@ -114,7 +114,9 @@ For the Home Assistant Community Node-RED app, set
 username and password that can open Node-RED. The hub discovers the installed
 app and its published port through Supervisor, then connects with HTTP Basic
 authentication. Supervisor supplies the endpoint metadata only; it does not
-give this app your login credentials.
+give this app your login credentials. Discovery needs the `manager` Supervisor
+role to list and read other apps; the add-on manifest grants this
+automatically, so no `url` is required in the common case.
 
 Do **not** use a Home Assistant long-lived access token here. Such tokens are
 for Home Assistant's API and are not accepted by the Node-RED app's Admin API
