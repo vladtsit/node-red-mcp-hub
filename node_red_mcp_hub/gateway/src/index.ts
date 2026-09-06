@@ -102,5 +102,9 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().catch(() => { console.error("Node-RED MCP Hub could not start; check add-on options"); process.exitCode = 1; });
+  main().catch((error: unknown) => {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`Node-RED MCP Hub could not start; check add-on options: ${detail}`);
+    process.exitCode = 1;
+  });
 }

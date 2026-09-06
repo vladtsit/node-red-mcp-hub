@@ -5,6 +5,7 @@ export const MAX_BODY_BYTES = 10 * 1024 * 1024;
 export const REQUEST_TIMEOUT_MS = 15_000;
 export const MAX_IN_FLIGHT = 20;
 const SUPERVISOR_DISCOVERY_TIMEOUT_MS = 5_000;
+const NODE_RED_INTERNAL_PORT = 1880;
 export const DEFAULT_BACKUP_DIR = "/data/backups";
 
 export type AuthMode = "credentials" | "bearer" | "basic" | "none";
@@ -173,16 +174,38 @@ function primaryIpv4(info: Record<string, unknown> | undefined): string | undefi
   return typeof value === "string" ? value.split("/", 1)[0] : undefined;
 }
 
+function portNumber(value: unknown): number | undefined {
+  const port = typeof value === "number" || typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isInteger(port) && port >= 1 && port <= 65_535 ? port : undefined;
+}
+
+/**
+ * Supervisor reports a container-port to host-port map such as
+ * `{ "1880/tcp": 1880 }`. Node-RED's own port is preferred; any other single
+ * mapping is accepted so a relocated Admin API still resolves.
+ */
+function networkPorts(info: Record<string, unknown>): { internal: number; published?: number } {
+  const network = record(info.network) ?? {};
+  const mappings: { internal: number; published?: number }[] = [];
+  for (const [container, host] of Object.entries(network)) {
+    const internal = portNumber(container.split("/", 1)[0]);
+    if (internal !== undefined) mappings.push({ internal, published: portNumber(host) });
+  }
+  return mappings.find((mapping) => mapping.internal === NODE_RED_INTERNAL_PORT)
+    ?? mappings[0]
+    ?? { internal: NODE_RED_INTERNAL_PORT };
+}
+
+/**
+ * Prefer the Home Assistant LAN address plus Node-RED's published host port so
+ * the target stays reachable from an app container, and fall back to the
+ * Supervisor-internal address when Node-RED publishes no host port.
+ */
 function discoveredUrl(info: Record<string, unknown>, hostAddress?: string): string | undefined {
-  const address = typeof info.ip_address === "string" ? info.ip_address : undefined;
-  if (!address) return undefined;
-  const network = record(info.network);
-  const configuredPort = network?.["80/tcp"];
-  const publishedPort = typeof configuredPort === "number" || typeof configuredPort === "string" ? Number(configuredPort) : undefined;
-  const usePublishedPort = Number.isInteger(publishedPort) && publishedPort! >= 1 && publishedPort! <= 65_535 && typeof hostAddress === "string";
-  const port = usePublishedPort ? publishedPort! : 80;
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
-  return `http://${usePublishedPort ? hostAddress : address}:${port}`;
+  const { internal, published } = networkPorts(info);
+  if (hostAddress && published !== undefined) return `http://${hostAddress}:${published}`;
+  const address = typeof info.ip_address === "string" && info.ip_address ? info.ip_address : undefined;
+  return address ? `http://${address}:${internal}` : undefined;
 }
 
 async function supervisorJson(path: string, token: string, request: SupervisorFetch): Promise<Record<string, unknown> | undefined> {
@@ -234,14 +257,14 @@ export async function discoverHomeAssistantNodeRed(
     const addons = await supervisorJson("/addons", supervisorToken, request);
     const addon = localNodeRedCandidate(addons?.addons);
     const slug = typeof addon?.slug === "string" ? addon.slug : undefined;
-    if (!slug) fail("home_assistant_node_red could not find an installed Node-RED app");
+    if (!slug) fail("home_assistant_node_red could not find an installed Node-RED app; set home_assistant_node_red.url instead");
     const info = await supervisorJson(`/addons/${encodeURIComponent(slug)}/info`, supervisorToken, request);
-    if (!info) fail("home_assistant_node_red could not read Node-RED app metadata");
+    if (!info) fail("home_assistant_node_red could not read Node-RED app metadata; set home_assistant_node_red.url instead");
     const network = await supervisorJson("/network/info", supervisorToken, request);
     baseUrl = discoveredUrl(info, primaryIpv4(network));
     if (typeof info.name === "string" && info.name) name = info.name;
   }
-  if (!baseUrl) fail("home_assistant_node_red could not determine the Node-RED Admin API URL");
+  if (!baseUrl) fail("home_assistant_node_red could not determine the Node-RED Admin API URL; set home_assistant_node_red.url instead");
 
   return {
     ...input,

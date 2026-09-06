@@ -35,7 +35,7 @@ test("discovers the local Home Assistant Node-RED target without replacing manua
     if (url.endsWith("/network/info")) {
       return new Response(JSON.stringify({ interfaces: [{ primary: true, ipv4: { address: ["192.168.3.57/24"] } }] }));
     }
-    return new Response(JSON.stringify({ name: "Node-RED", ip_address: "172.30.32.1", host_network: true, network: { "80/tcp": 1880 } }));
+    return new Response(JSON.stringify({ name: "Node-RED", ip_address: "172.30.32.1", host_network: true, network: { "1880/tcp": 1880 } }));
   }, "supervisor-token");
   const config = parseConfig(discovered);
   assert.equal(config.servers.get("home_assistant_node_red")?.baseUrl.toString(), "http://192.168.3.57:1880/");
@@ -65,16 +65,41 @@ test("uses an explicit local HTTP URL without requiring Supervisor discovery", a
   assert.equal(config.servers.get("home_assistant_node_red")?.baseUrl.toString(), "http://192.168.3.57:1880/");
 });
 
-test("falls back to the app-internal HTTP port when Node-RED has no published host port", async () => {
+test("falls back to the app-internal Node-RED port when it publishes no host port", async () => {
   const discovered = await discoverHomeAssistantNodeRed({
     mcp_path_secret: "a".repeat(64), read_only: true, servers: [],
     home_assistant_node_red: { enabled: true, username: "ha-user", password: "ha-password" },
   }, async (url) => {
     if (url.endsWith("/addons")) return new Response(JSON.stringify({ addons: [{ name: "Node-RED", slug: "a0d7b954_nodered" }] }));
     if (url.endsWith("/network/info")) return new Response(JSON.stringify({ interfaces: [] }));
-    return new Response(JSON.stringify({ name: "Node-RED", ip_address: "172.30.32.9", network: { "80/tcp": null } }));
+    return new Response(JSON.stringify({ name: "Node-RED", ip_address: "172.30.32.9", network: { "1880/tcp": null } }));
   }, "supervisor-token");
-  assert.equal(parseConfig(discovered).servers.get("home_assistant_node_red")?.baseUrl.toString(), "http://172.30.32.9/");
+  assert.equal(parseConfig(discovered).servers.get("home_assistant_node_red")?.baseUrl.toString(), "http://172.30.32.9:1880/");
+});
+
+test("discovers a host-networked Node-RED that reports no ports and no container address", async () => {
+  const discovered = await discoverHomeAssistantNodeRed({
+    mcp_path_secret: "a".repeat(64), read_only: true, servers: [],
+    home_assistant_node_red: { enabled: true, username: "ha-user", password: "ha-password" },
+  }, async (url) => {
+    if (url.endsWith("/addons")) return new Response(JSON.stringify({ addons: [{ name: "Node-RED", slug: "a0d7b954_nodered" }] }));
+    if (url.endsWith("/network/info")) {
+      return new Response(JSON.stringify({ interfaces: [{ primary: true, ipv4: { address: ["192.168.3.57/24"] } }] }));
+    }
+    return new Response(JSON.stringify({ name: "Node-RED", ip_address: "", host_network: true, network: { "1880/tcp": 1880 } }));
+  }, "supervisor-token");
+  assert.equal(parseConfig(discovered).servers.get("home_assistant_node_red")?.baseUrl.toString(), "http://192.168.3.57:1880/");
+});
+
+test("reports an actionable error when no endpoint can be resolved", async () => {
+  await assert.rejects(() => discoverHomeAssistantNodeRed({
+    mcp_path_secret: "a".repeat(64), read_only: true, servers: [],
+    home_assistant_node_red: { enabled: true, username: "ha-user", password: "ha-password" },
+  }, async (url) => {
+    if (url.endsWith("/addons")) return new Response(JSON.stringify({ addons: [{ name: "Node-RED", slug: "a0d7b954_nodered" }] }));
+    if (url.endsWith("/network/info")) return new Response(JSON.stringify({ interfaces: [] }));
+    return new Response(JSON.stringify({ name: "Node-RED", ip_address: "", network: {} }));
+  }, "supervisor-token"), /set home_assistant_node_red\.url instead/);
 });
 
 test("builds a copyable MCP URL from the primary Home Assistant LAN address", async () => {

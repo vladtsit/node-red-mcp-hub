@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.1 - 2026-09-06
+
+### Fixed
+
+- Home Assistant Node-RED discovery read the published host port from a `80/tcp`
+  mapping and required a non-empty container address, so it failed for the
+  Community app and forced an explicit `home_assistant_node_red.url`. Discovery
+  now resolves Node-RED's own `1880/tcp` mapping, prefers the Home Assistant LAN
+  address with the published host port, and falls back to the Supervisor
+  internal address with Node-RED's container port.
+- Startup failures now report the rejected add-on option instead of a generic
+  message, and Supervisor discovery errors name the setting that resolves them.
+
+### Changed
+
+- `home_assistant_node_red.read_only` is now present in the default options so
+  the per-target write gate is visible and editable in the Configuration tab.
+- Documented that write tools require both the global and per-target
+  `read_only` to be `false`, that `home_assistant_node_red` is a required key,
+  that every `servers` entry needs `id`, `name`, `url`, and `auth_mode`, and
+  that the Community Node-RED app requires `auth_mode: basic` rather than
+  `credentials`.
+- Added a troubleshooting section covering restart-to-apply behavior,
+  `AUTH_FAILED`, and `READ_ONLY` results.
+
 ## 0.3.0 - 2026-09-06
 
 ### Added

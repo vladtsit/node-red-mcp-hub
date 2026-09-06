@@ -21,8 +21,15 @@ credentials, and write tools take effect immediately.
    automatically; additional targets remain manually configurable. Changes
    take effect after restarting the app.
 4. Start with `read_only: true`. Set it to `false` only when the MCP client
-   should be permitted to alter flows. A target's `read_only: true` protects
-   that target even while global writes are enabled.
+   should be permitted to alter flows. Writes require **both** gates to be open:
+   the global `read_only` and the target's own `read_only` must each be `false`.
+   Either one left at `true` blocks every write tool for that target.
+
+`home_assistant_node_red` is a required key. Leave it as `enabled: false` when
+you configure every target manually; do not delete the key.
+
+Each entry under `servers` requires `id`, `name`, `url`, and `auth_mode`. A
+missing `name` is the most common reason the Configuration tab refuses to save.
 
 Example options (replace every example value except the first-start `auto`):
 
@@ -50,13 +57,19 @@ authentication. The add-on validates the fields required by the selected mode.
 
 Enable `home_assistant_node_red` and provide the Home Assistant username and
 password that can open the Community Node-RED app. The hub uses Supervisor to
-locate the installed app and its published port, then authenticates its Admin
-API using HTTP Basic. Supervisor does not provide or replace the credentials.
+locate the installed app, prefers the Home Assistant LAN address with Node-RED's
+published host port, and falls back to the Supervisor-internal address and
+Node-RED's own port when no host port is published. It then authenticates the
+Admin API using HTTP Basic, because the Community app fronts Node-RED with an
+HTTP Basic proxy. Supervisor does not provide or replace the credentials.
 
-A Home Assistant long-lived access token is not accepted by this proxy, even
-though it works with Home Assistant's REST API. For a trusted-LAN HTTP setup,
-publish Node-RED on port `1880` and disable SSL in the Node-RED app. If endpoint
-discovery fails, provide the direct URL explicitly:
+Use `auth_mode: basic` for this app. `auth_mode: credentials` targets Node-RED's
+native `adminAuth` login and is rejected by that proxy. A Home Assistant
+long-lived access token is not accepted either, even though it works with Home
+Assistant's REST API. For a trusted-LAN HTTP setup, publish Node-RED on port
+`1880` and disable SSL in the Node-RED app. If discovery cannot resolve an
+endpoint, the app stops with an error naming the setting to add; provide the
+direct URL explicitly:
 
 ```yaml
 home_assistant_node_red:
@@ -72,7 +85,23 @@ The Home Assistant frontend route such as
 cannot be used as a hub target.
 
 Use `servers` for other Node-RED instances. The discovered local target has the
-fixed ID `home_assistant_node_red`; manual target IDs must be unique.
+fixed ID `home_assistant_node_red`; manual target IDs must be unique. To manage
+the local app as a manual entry instead, keep `home_assistant_node_red.enabled`
+at `false` and give the manual entry a different ID:
+
+```yaml
+home_assistant_node_red:
+  enabled: false
+  read_only: true
+servers:
+  - id: local_node_red
+    name: Home Assistant Node-RED
+    url: http://192.168.3.57:1880
+    auth_mode: basic
+    username: YOUR_HOME_ASSISTANT_USERNAME
+    password: YOUR_HOME_ASSISTANT_PASSWORD
+    read_only: false
+```
 
 ## Connect an MCP client
 
@@ -142,3 +171,19 @@ that target. Unknown names are rejected and `list_servers` is always present.
 - The runtime image uses a dated, digest-pinned Home Assistant Alpine base and
   contains only production Node.js dependencies. CI builds both `amd64` and
   `aarch64` images.
+
+## Troubleshooting
+
+- Options are read once at start. Save the Configuration tab and then restart
+  the app; edits never take effect while it is running.
+- If the app stops immediately, the log names the rejected option. Every target
+  must be reachable in configuration terms before the MCP port opens, so a
+  configuration error appears as a refused connection on port `51844`.
+- `check_servers` reports per-target reachability, latency, and Node-RED
+  version, and is the fastest way to confirm credentials after a change.
+- `AUTH_FAILED` with HTTP 401 against the Community Node-RED app usually means
+  `auth_mode` is `credentials` where the app's HTTP Basic proxy requires
+  `basic`.
+- A write tool returning `READ_ONLY` means the global `read_only` or the
+  target's `read_only` is still `true`; both must be `false`.
+
