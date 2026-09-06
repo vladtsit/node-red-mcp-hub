@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { connect } from "node:net";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { parseConfig } from "../src/config.js";
@@ -50,7 +53,15 @@ test("actual MCP client initializes, discovers, and routes simultaneous target r
   const targets = await Promise.all(["one", "two"].map(async (label) => start(createServer((request, response) => {
     if (request.url === "/admin/flows") {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ rev: label, flows: [{ id: label }] }));
+      response.end(JSON.stringify({ rev: label, flows: [
+        { id: `${label}-tab`, type: "tab", label: `Flow ${label}` },
+        { id: label, type: "inject", name: `Hello ${label}`, z: `${label}-tab`, payload: "not returned by summaries" },
+      ] }));
+      return;
+    }
+    if (request.url === "/admin/settings") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ version: `4.0.${label === "one" ? 1 : 2}` }));
       return;
     }
     response.writeHead(404).end();
@@ -65,10 +76,38 @@ test("actual MCP client initializes, discovers, and routes simultaneous target r
   const client = await mcp(gateway.url, secret);
   t.after(() => client.close());
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["get_diagnostics", "get_flow", "get_flow_state", "get_flows", "get_installed_modules", "get_settings", "list_servers"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["check_servers", "get_diagnostics", "get_flow", "get_flow_state", "get_flows", "get_installed_modules", "get_settings", "list_flows", "list_servers", "search_nodes"]);
+  assert.ok(listed.tools.every((tool) => tool.annotations?.readOnlyHint === true && tool.annotations.openWorldHint === true));
+  const checks = await client.callTool({ name: "check_servers", arguments: {} });
+  assert.match((checks.content as { text: string }[])[0].text, /"ok":true/);
+  assert.match((checks.content as { text: string }[])[0].text, /"version":"4\.0\.1"/);
   const [one, two] = await Promise.all(["one", "two"].map((server_id) => client.callTool({ name: "get_flows", arguments: { server_id } })));
   assert.match((one.content as { text: string }[])[0].text, /"one"/);
   assert.match((two.content as { text: string }[])[0].text, /"two"/);
+  assert.ok(one.structuredContent && "data" in (one.structuredContent as Record<string, unknown>));
+  const summaries = await client.callTool({ name: "list_flows", arguments: { server_id: "one" } });
+  assert.match((summaries.content as { text: string }[])[0].text, /"node_count":1/);
+  assert.doesNotMatch((summaries.content as { text: string }[])[0].text, /not returned by summaries/);
+  const search = await client.callTool({ name: "search_nodes", arguments: { server_id: "one", query: "hello" } });
+  assert.match((search.content as { text: string }[])[0].text, /"flow_label":"Flow one"/);
+  assert.doesNotMatch((search.content as { text: string }[])[0].text, /not returned by summaries/);
+});
+
+test("global tool policy hides tools and target policy blocks calls", async (t) => {
+  const secret = "a".repeat(64);
+  const gateway = await start(createGateway(parseConfig({
+    mcp_path_secret: secret, read_only: true, disabled_tools: "get_diagnostics",
+    servers: [{ id: "target", name: "Target", url: "http://127.0.0.1:1", auth_mode: "none", read_only: true, disabled_tools: "get_flows" }],
+  })));
+  t.after(gateway.close);
+  const client = await mcp(gateway.url, secret);
+  t.after(() => client.close());
+  const tools = await client.listTools();
+  assert.equal(tools.tools.some((tool) => tool.name === "get_diagnostics"), false);
+  assert.equal(tools.tools.some((tool) => tool.name === "get_flows"), true);
+  const blocked = await client.callTool({ name: "get_flows", arguments: { server_id: "target" } });
+  assert.equal(blocked.isError, true);
+  assert.match((blocked.content as { text: string }[])[0].text, /TOOL_DISABLED/);
 });
 
 test("private route rejects browser origins and write protection applies at target scope", async (t) => {
@@ -82,6 +121,8 @@ test("private route rejects browser origins and write protection applies at targ
   t.after(gateway.close);
   const wrong = await fetch(`${gateway.url}/private_wrong`);
   assert.equal(wrong.status, 404);
+  const query = await fetch(`${gateway.url}/private_${secret}?unexpected=true`, { method: "POST", body: "{}" });
+  assert.equal(query.status, 404);
   const browser = await fetch(`${gateway.url}/private_${secret}`, { method: "POST", headers: { origin: "http://evil.invalid" }, body: "{}" });
   assert.equal(browser.status, 403);
   const client = await mcp(gateway.url, secret);
@@ -89,6 +130,64 @@ test("private route rejects browser origins and write protection applies at targ
   const response = await client.callTool({ name: "delete_flow", arguments: { server_id: "locked", flow_id: "x" } });
   assert.equal(response.isError, true);
   assert.match((response.content as { text: string }[])[0].text, /read_only/);
+});
+
+test("Basic-authenticated writes create a private pre-write flow backup", async (t) => {
+  const authorizations: string[] = [];
+  const target = await start(createServer((request, response) => {
+    authorizations.push(String(request.headers.authorization));
+    if (request.url === "/flows") {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "before", flows: [{ id: "tab", type: "tab", label: "Main" }] }));
+      return;
+    }
+    if (request.url === "/flow") { response.writeHead(204).end(); return; }
+    response.writeHead(404).end();
+  }));
+  t.after(target.close);
+  const backupDir = await mkdtemp(join(tmpdir(), "node-red-mcp-backup-"));
+  t.after(() => rm(backupDir, { recursive: true, force: true }));
+  const secret = "f".repeat(64);
+  const config = parseConfig({
+    mcp_path_secret: secret, read_only: false, backup_before_write: true,
+    servers: [{ id: "target", name: "Target", url: target.url, auth_mode: "basic", username: "ha", password: "secret", read_only: false }],
+  });
+  config.backupDir = backupDir;
+  const gateway = await start(createGateway(config));
+  t.after(gateway.close);
+  const client = await mcp(gateway.url, secret);
+  t.after(() => client.close());
+  const tools = await client.listTools();
+  const create = tools.tools.find((tool) => tool.name === "create_flow");
+  assert.equal(create?.annotations?.destructiveHint, false);
+  const response = await client.callTool({ name: "create_flow", arguments: { server_id: "target", flow: { id: "new" } } });
+  assert.equal(response.isError, undefined);
+  assert.deepEqual(authorizations, ["Basic aGE6c2VjcmV0", "Basic aGE6c2VjcmV0"]);
+  const files = await readdir(join(backupDir, "target"));
+  assert.equal(files.length, 1);
+  const backup = JSON.parse(await readFile(join(backupDir, "target", files[0]), "utf8"));
+  assert.equal(backup.flows.rev, "before");
+});
+
+test("a failed pre-write backup blocks the mutation", async (t) => {
+  let writes = 0;
+  const target = await start(createServer((request, response) => {
+    if (request.url === "/flows") { response.writeHead(503).end(); return; }
+    if (request.url === "/flow") writes += 1;
+    response.writeHead(204).end();
+  }));
+  t.after(target.close);
+  const secret = "9".repeat(64);
+  const gateway = await start(createGateway(parseConfig({
+    mcp_path_secret: secret, read_only: false, backup_before_write: true,
+    servers: [{ id: "target", name: "Target", url: target.url, auth_mode: "none", read_only: false }],
+  })));
+  t.after(gateway.close);
+  const client = await mcp(gateway.url, secret);
+  t.after(() => client.close());
+  const response = await client.callTool({ name: "create_flow", arguments: { server_id: "target", flow: { id: "must-not-run" } } });
+  assert.equal(response.isError, true);
+  assert.match((response.content as { text: string }[])[0].text, /BACKUP_FAILED/);
+  assert.equal(writes, 0);
 });
 
 test("native writes preserve payloads and expose Node-RED revision conflicts", async (t) => {
@@ -101,7 +200,7 @@ test("native writes preserve payloads and expose Node-RED revision conflicts", a
     response.writeHead(204).end();
   }));
   t.after(target.close);
-  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "none", readOnly: false });
+  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "none", readOnly: false, disabledTools: new Set() });
   const flow = { id: "tab-1", label: "Custom", custom_property: { retained: true }, credentials: { unchanged: true } };
   await client.updateFlow("tab-1", flow);
   assert.deepEqual(seen[0], { method: "PUT", path: "/flow/tab-1", body: flow, deployment: undefined });
@@ -120,7 +219,7 @@ test("credentials are cached, known credential fields are redacted, and invalid 
     }
     if (request.url === "/flows") {
       flowRequests += 1;
-      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: [{ id: "x", credentials: { password: "never-return" } }] }));
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: [{ id: "x", credentials: { password: "never-return" }, api_key: "also-never-return" }] }));
       return;
     }
     if (request.url === "/flow") {
@@ -130,11 +229,15 @@ test("credentials are cached, known credential fields are redacted, and invalid 
     response.writeHead(404).end();
   }));
   t.after(target.close);
-  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "credentials", username: "u", password: "p", readOnly: false });
+  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "credentials", username: "u", password: "p", readOnly: false, disabledTools: new Set() });
   const reads = await Promise.all(Array.from({ length: 12 }, () => client.getFlows()));
   assert.equal(tokenRequests, 1);
   assert.equal(flowRequests, 12);
-  assert.equal((reads[0] as { redacted_credentials: boolean }).redacted_credentials, true);
+  const redacted = reads[0] as { redacted_credentials: boolean; redacted_secrets: boolean; suitable_for_unchanged_round_trip: boolean; data: unknown };
+  assert.equal(redacted.redacted_credentials, true);
+  assert.equal(redacted.redacted_secrets, true);
+  assert.equal(redacted.suitable_for_unchanged_round_trip, false);
+  assert.doesNotMatch(JSON.stringify(redacted.data), /never-return/);
   await assert.rejects(() => client.getFlow(".."), /Invalid flow ID/);
   await assert.rejects(() => client.createFlow({ id: "write" }), (error: unknown) => error instanceof UpstreamError && error.outcomeUnknown);
 });
@@ -156,7 +259,7 @@ test("a rejected credential-mode write clears its token without being replayed",
     response.writeHead(404).end();
   }));
   t.after(target.close);
-  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "credentials", username: "u", password: "p", readOnly: false });
+  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "credentials", username: "u", password: "p", readOnly: false, disabledTools: new Set() });
   await assert.rejects(() => client.createFlow({ id: "one" }), (error: unknown) => error instanceof UpstreamError && error.status === 401);
   await assert.rejects(() => client.createFlow({ id: "two" }), (error: unknown) => error instanceof UpstreamError && error.status === 401);
   assert.equal(tokenRequests, 2);

@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { MAX_BODY_BYTES, MAX_IN_FLIGHT, PORT, loadConfig, type GatewayConfig } from "./config.js";
 import { GatewayRuntime, registerTools } from "./tools.js";
+import { APP_VERSION } from "./version.js";
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -33,7 +34,7 @@ async function parseJson(request: IncomingMessage): Promise<unknown> {
 }
 
 function createMcpServer(config: GatewayConfig, runtime: GatewayRuntime): McpServer {
-  const mcp = new McpServer({ name: "node-red-mcp-hub", version: "0.1.0" });
+  const mcp = new McpServer({ name: "node-red-mcp-hub", version: APP_VERSION });
   registerTools(mcp, config, runtime);
   return mcp;
 }
@@ -41,7 +42,7 @@ function createMcpServer(config: GatewayConfig, runtime: GatewayRuntime): McpSer
 export function createGateway(config: GatewayConfig) {
   const runtime = new GatewayRuntime(config);
   let inFlight = 0;
-  return createServer(async (request, response) => {
+  const gateway = createServer(async (request, response) => {
     let url: URL;
     try { url = new URL(request.url ?? "/", "http://gateway.invalid"); }
     catch { return json(response, 400, { error: "invalid_request_target" }); }
@@ -49,6 +50,7 @@ export function createGateway(config: GatewayConfig) {
       if (request.method !== "GET") return json(response, 405, { error: "method_not_allowed" });
       return json(response, 200, { status: "ok" });
     }
+    if (url.search) return json(response, 404, { error: "not_found" });
     if (!secretPathMatches(url.pathname, config.pathSecret)) return json(response, 404, { error: "not_found" });
     if (request.headers.origin) return json(response, 403, { error: "origin_not_allowed" });
     if (request.method !== "POST") return json(response, 405, { error: "method_not_allowed" });
@@ -78,12 +80,25 @@ export function createGateway(config: GatewayConfig) {
       }
     } finally { inFlight -= 1; }
   });
+  gateway.headersTimeout = 10_000;
+  gateway.requestTimeout = 30_000;
+  gateway.keepAliveTimeout = 5_000;
+  gateway.maxRequestsPerSocket = 100;
+  gateway.on("clientError", (_error, socket) => socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"));
+  return gateway;
 }
 
 async function main(): Promise<void> {
   const config = await loadConfig();
   const gateway = createGateway(config);
-  gateway.listen(PORT, "0.0.0.0", () => console.log(`Node-RED MCP Hub listening on ${PORT}`));
+  gateway.listen(PORT, "0.0.0.0", () => console.log(`Node-RED MCP Hub ${APP_VERSION} listening on ${PORT}`));
+  const stop = (signal: string) => {
+    console.log(`Received ${signal}; shutting down`);
+    gateway.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 10_000).unref();
+  };
+  process.once("SIGTERM", () => stop("SIGTERM"));
+  process.once("SIGINT", () => stop("SIGINT"));
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

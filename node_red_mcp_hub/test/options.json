@@ -1,6 +1,13 @@
 {
   "mcp_path_secret": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
   "read_only": true,
+  "redact_secrets": true,
+  "backup_before_write": true,
+  "backup_retain": 20,
+  "disabled_tools": "",
+  "home_assistant_node_red": {
+    "enabled": false
+  },
   "servers": [
     {
       "id": "fixture",

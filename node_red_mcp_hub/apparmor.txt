@@ -24,4 +24,5 @@ profile node_red_mcp_hub flags=(attach_disconnected,mediate_deleted) {
   /tmp/** rwk,
   /app/** rix,
   /data/options.json r,
+  /data/backups/{,**} rwk,
 }

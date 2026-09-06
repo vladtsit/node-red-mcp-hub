@@ -17,7 +17,9 @@ credentials, and write tools take effect immediately.
    `openssl rand -hex 32`.
 3. Add one to twenty Node-RED Admin API targets. Use the direct Admin URL,
    including its admin-root prefix when it has one; do not use a Home Assistant
-   ingress URL. Changes take effect after restarting the add-on.
+   ingress URL. The local Home Assistant Node-RED target can be discovered
+   automatically; additional targets remain manually configurable. Changes
+   take effect after restarting the app.
 4. Start with `read_only: true`. Set it to `false` only when the MCP client
    should be permitted to alter flows. A target's `read_only: true` protects
    that target even while global writes are enabled.
@@ -27,16 +29,16 @@ Example options (replace every example value except the first-start `auto`):
 ```yaml
 mcp_path_secret: auto
 read_only: true
+redact_secrets: true
+backup_before_write: true
+backup_retain: 20
+disabled_tools: ''
 home_assistant_node_red:
-  enabled: false
-servers:
-  - id: home-node-red
-    name: Home Assistant Node-RED
-    url: http://192.168.3.57:1880
-    auth_mode: basic
-    username: YOUR_HOME_ASSISTANT_USERNAME
-    password: YOUR_HOME_ASSISTANT_PASSWORD
-    read_only: true
+  enabled: true
+  username: YOUR_HOME_ASSISTANT_USERNAME
+  password: YOUR_HOME_ASSISTANT_PASSWORD
+  read_only: true
+servers: []
 ```
 
 `credentials` exchanges the supplied Node-RED username and password for a
@@ -46,36 +48,31 @@ authentication. The add-on validates the fields required by the selected mode.
 
 ### Local Home Assistant Node-RED app
 
-The official Home Assistant Node-RED app requires **HTTP Basic authentication**
-at its Admin API proxy. Add it as a regular server with `auth_mode: basic`, the
-Home Assistant username and password that can open Node-RED, and its direct
-Admin API URL. A Home Assistant long-lived access token is not accepted by this
-proxy, even though it works with Home Assistant's REST API.
+Enable `home_assistant_node_red` and provide the Home Assistant username and
+password that can open the Community Node-RED app. The hub uses Supervisor to
+locate the installed app and its published port, then authenticates its Admin
+API using HTTP Basic. Supervisor does not provide or replace the credentials.
 
-Set `home_assistant_node_red.enabled: false` for the official app. The optional
-automatic discovery target authenticates with a bearer token and is not
-compatible with the current Home Assistant Node-RED proxy. It does not affect
-manually configured targets.
-
-For a trusted-LAN HTTP setup, expose the Node-RED app's direct port as `1880`,
-disable SSL in the Node-RED app configuration, and set:
+A Home Assistant long-lived access token is not accepted by this proxy, even
+though it works with Home Assistant's REST API. For a trusted-LAN HTTP setup,
+publish Node-RED on port `1880` and disable SSL in the Node-RED app. If endpoint
+discovery fails, provide the direct URL explicitly:
 
 ```yaml
 home_assistant_node_red:
-  enabled: false
-servers:
-  - id: home-node-red
-    name: Home Assistant Node-RED
-    url: http://192.168.3.57:1880
-    auth_mode: basic
-    username: YOUR_HOME_ASSISTANT_USERNAME
-    password: YOUR_HOME_ASSISTANT_PASSWORD
-    read_only: true
+  enabled: true
+  username: YOUR_HOME_ASSISTANT_USERNAME
+  password: YOUR_HOME_ASSISTANT_PASSWORD
+  url: http://192.168.3.57:1880
+  read_only: true
 ```
 
 The Home Assistant frontend route such as
 `http://192.168.3.57:8123/app/a0d7b954_nodered` is not an Admin API URL and
 cannot be used as a hub target.
+
+Use `servers` for other Node-RED instances. The discovered local target has the
+fixed ID `home_assistant_node_red`; manual target IDs must be unique.
 
 ## Connect an MCP client
 
@@ -93,10 +90,16 @@ route; it contains no target health or configuration data.
 
 ## Tools and write behavior
 
-Every tool except `list_servers` requires `server_id`. Read tools retrieve
-flows, a single flow, selected settings, sanitized diagnostics, runtime flow
-state, and installed modules. `get_flows` returns Node-RED's `rev` alongside
-the graph.
+`list_servers` and `check_servers` operate across targets; other tools require
+`server_id`. Prefer `list_flows` for compact tab/subflow summaries and
+`search_nodes` for compact metadata. `get_flow` and `get_flows` return detailed
+definitions and can expose sensitive Function code or arbitrary node
+properties. `get_flows` returns Node-RED's `rev` alongside the graph.
+
+With `redact_secrets: true`, detailed reads remove all `credentials` objects and
+redact properties with recognized password, token, secret, authorization, or
+API-key names. This is defense in depth, not a guarantee that arbitrary flow
+content is safe to share.
 
 When global write access is enabled, `create_flow`, `update_flow`,
 `delete_flow`, and `deploy_flows` are available. They map directly to the
@@ -109,11 +112,19 @@ to Node-RED. A stale revision is returned as Node-RED's HTTP 409; the hub never
 forces or retries a deploy. Individual-flow operations use Node-RED's native
 concurrency behavior and have no hub-side revision control.
 
-Writes are immediate. If the network fails or a write times out after it may
-have reached Node-RED, the response marks the outcome as unknown. Do not retry
-automatically—read the target first to determine its actual state. The hub has
-no rollback, snapshots, history, or recovery journal. Use Node-RED/Home
-Assistant backups for backup and restore.
+Writes are immediate. Before each write, `backup_before_write: true` stores an
+atomic, unredacted v2 flow snapshot in `/data/backups/<server-id>/`; it blocks
+the write if the backup fails. At most `backup_retain` snapshots are kept per
+server. These files are private but sensitive and are intended for deliberate
+manual recovery, not automatic rollback.
+
+If the network fails or a write times out after it may have reached Node-RED,
+the structured error marks the outcome as unknown. Do not retry automatically—
+read the target first to determine its actual state.
+
+Use the optional comma-separated `disabled_tools` setting to remove tools
+globally, or the same field on a manual server to block operations only for
+that target. Unknown names are rejected and `list_servers` is always present.
 
 ## Operational notes
 
@@ -121,10 +132,13 @@ Assistant backups for backup and restore.
 - The gateway runs as the app's root user inside its custom AppArmor profile;
   Home Assistant's restricted app environment does not permit the ownership
   changes needed to drop to a separate Unix user.
-- The gateway has a 15-second outbound timeout, 10 MiB request/response limits,
-  20 in-flight call limit, TLS certificate verification, and disabled redirects.
+- The gateway has a 15-second outbound timeout, hardened inbound timeouts,
+  10 MiB request/response limits, a 20-call concurrency limit, TLS certificate
+  verification, disabled redirects, and graceful SIGTERM/SIGINT shutdown.
 - It uses no database and persists no target tokens. Add-on logs intentionally
   omit private URLs, headers, option secrets, and flow bodies.
-- This package is tested with Node.js 20+ and MCP SDK 1.30.0. Build both `amd64`
-  and `aarch64` images before publishing a release. To publish it to GHCR, set
-  the real repository owner in the image and repository metadata first.
+- Tool responses include stable structured success/error objects and explicit
+  MCP safety annotations in addition to text content for older clients.
+- The runtime image uses a dated, digest-pinned Home Assistant Alpine base and
+  contains only production Node.js dependencies. CI builds both `amd64` and
+  `aarch64` images.

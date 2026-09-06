@@ -4,7 +4,8 @@ A small Home Assistant app wrapping multiple Node-RED Admin APIs through one MCP
 
 HTTP port **51844** references Morse's 1844 Washington–Baltimore telegraph demonstration. [Library of Congress](https://www.loc.gov/item/mcc00054/)
 
-Planned URL: http://192.168.3.57:51844/private_<secret>, with URL-only access for trusted LAN clients.
+URL format: `http://192.168.3.57:51844/private_<secret>`, with URL-only access
+for trusted LAN clients.
 
 - [Simple architecture and API tool mapping](BUILDING_A_MULTI_NODE_RED_MCP_HOME_ASSISTANT_APP.md)
 - [Developer instructions](DEVELOPER_GUIDE.md)
@@ -13,7 +14,8 @@ Planned URL: http://192.168.3.57:51844/private_<secret>, with URL-only access fo
 
 No database, flow history or approval workflow. Node-RED owns the flows; the hub forwards requests.
 
-Slug: node_red_mcp_hub. Repository: home-assistant-node-red-mcp-hub. Configure the final GHCR image name when publishing.
+Slug: `node_red_mcp_hub`. Repository:
+`https://github.com/vladtsit/node-red-mcp-hub`.
 
 Status: implementation complete. The Home Assistant add-on, strict TypeScript
 gateway, focused integration tests, and CI workflow are included. See the
@@ -29,7 +31,7 @@ its **Admin API** reachable from Home Assistant, and an MCP client that supports
 remote Streamable HTTP servers. The hub connects to Node-RED's admin endpoint;
 it does not use Home Assistant ingress URLs.
 
-For each Node-RED target, collect:
+For each additional manually configured Node-RED target, collect:
 
 - A short unique identifier, such as `home` or `lab`.
 - Its direct Admin API URL, for example `http://192.168.3.57:1880`. Include the
@@ -62,16 +64,16 @@ secret value as `auto`.
 ```yaml
 mcp_path_secret: auto
 read_only: true
+redact_secrets: true
+backup_before_write: true
+backup_retain: 20
+disabled_tools: ''
 home_assistant_node_red:
-  enabled: false
-servers:
-  - id: home-node-red
-    name: Home Assistant Node-RED
-    url: http://192.168.3.57:1880
-    auth_mode: basic
-    username: YOUR_HOME_ASSISTANT_USERNAME
-    password: YOUR_HOME_ASSISTANT_PASSWORD
-    read_only: true
+  enabled: true
+  username: YOUR_HOME_ASSISTANT_USERNAME
+  password: YOUR_HOME_ASSISTANT_PASSWORD
+  read_only: true
+servers: []
 ```
 
 Leave `mcp_path_secret: auto` on first start. The app generates 32 random bytes,
@@ -95,38 +97,48 @@ The global `read_only: true` hides every write tool. A server-level
 `read_only: true` remains protective after you enable global writes, so it is a
 useful way to keep selected Node-RED instances permanently read-only.
 
+`redact_secrets: true` always removes Node-RED `credentials` objects and also
+redacts properties whose names look like passwords, tokens, secrets, or API
+keys. Arbitrary node properties and Function code can still contain sensitive
+values, so prefer `list_flows` and `search_nodes` over full exports.
+
+`disabled_tools` is an optional comma-separated allow-policy override. Globally
+listed tools disappear from discovery; a server-level value blocks those tools
+only for that target. Unknown tool names fail validation so a typo cannot
+silently weaken the intended policy. `list_servers` cannot be disabled.
+
 #### Home Assistant Node-RED app
 
-The official Home Assistant Node-RED app authenticates its Admin API through
-the Home Assistant proxy with **HTTP Basic authentication**. Configure it as a
-regular server with `auth_mode: basic`, using the Home Assistant account
-username and password that can open Node-RED. Do **not** use a Home Assistant
-long-lived access token: it is valid for Home Assistant's REST API but is not
-accepted by the Node-RED proxy.
+For the Home Assistant Community Node-RED app, set
+`home_assistant_node_red.enabled: true` and enter the Home Assistant account
+username and password that can open Node-RED. The hub discovers the installed
+app and its published port through Supervisor, then connects with HTTP Basic
+authentication. Supervisor supplies the endpoint metadata only; it does not
+give this app your login credentials.
 
-Set `home_assistant_node_red.enabled: false` for this setup. The optional
-automatic discovery target currently authenticates with a bearer token and is
-therefore not suitable for the official Home Assistant Node-RED app. It does
-not affect manually configured `servers`.
+Do **not** use a Home Assistant long-lived access token here. Such tokens are
+for Home Assistant's API and are not accepted by the Node-RED app's Admin API
+proxy. For the simplest trusted-LAN HTTP setup, expose Node-RED's port as
+`1880`, disable SSL in the Node-RED app, and use the short configuration shown
+above.
 
-For a simple trusted-LAN setup, expose the Node-RED app's direct port as `1880`
-and disable SSL in its own configuration, then use:
+If automatic endpoint discovery is unavailable, set the optional direct URL:
 
 ```yaml
 home_assistant_node_red:
-  enabled: false
-servers:
-  - id: home-node-red
-    name: Home Assistant Node-RED
-    url: http://192.168.3.57:1880
-    auth_mode: basic
-    username: YOUR_HOME_ASSISTANT_USERNAME
-    password: YOUR_HOME_ASSISTANT_PASSWORD
-    read_only: true
+  enabled: true
+  username: YOUR_HOME_ASSISTANT_USERNAME
+  password: YOUR_HOME_ASSISTANT_PASSWORD
+  url: http://192.168.3.57:1880
+  read_only: true
 ```
 
 `http://192.168.3.57:8123/app/a0d7b954_nodered` is the Home Assistant frontend
 route, not the Node-RED Admin API, and must not be used as `url`.
+
+Add any other Node-RED instances under `servers`; automatic local discovery and
+manual targets work together. Manual targets retain all four authentication
+modes in the table above.
 
 Select **Save**, then open the **Info** tab and select **Start**. The app starts
 only when the configuration has one to twenty valid servers and a valid path
@@ -158,16 +170,25 @@ and CORS is disabled by design.
 ### First-run check
 
 1. With `read_only: true`, connect the MCP client and call `list_servers`.
-2. Call `get_flows` for a non-production or read-only server and confirm the
-   returned server and flow revision are expected.
-3. Review the add-on log for connection errors. A target failure does not make
+2. Call `check_servers` and confirm every target reports `ok: true`.
+3. Call `list_flows`, then `search_nodes` or `get_flow` only when more detail is
+   needed. Reserve `get_flows` for a complete export because it can be large
+   and may contain sensitive Function code or arbitrary node properties.
+4. Review the add-on log for connection errors. A target failure does not make
    the app health endpoint fail, so investigate each target independently.
-4. Before enabling writes, take a Home Assistant/Node-RED backup and test
+5. Before enabling writes, take a Home Assistant/Node-RED backup and test
    `create_flow`, `update_flow`, and `deploy_flows` only against a disposable
    Node-RED flow. Set global `read_only: false`, save, and restart the app to
    expose write tools.
 
 Writes take effect immediately. For a timeout or network failure after a write,
 read the target's current state before taking another action: Node-RED may have
-accepted the first request. The hub does not retry writes, create backups, or
-maintain a rollback history.
+accepted the first request. The hub never retries writes.
+
+With `backup_before_write: true`, the hub first stores the complete, unredacted
+v2 flow document under `/data/backups/<server-id>/`. Backup files are private,
+atomic, retained per server according to `backup_retain`, and may contain
+credentials or secrets needed for recovery. If a snapshot cannot be written,
+the requested mutation is blocked. The hub does not provide an automatic
+restore tool; restore deliberately through Node-RED or from a Home Assistant
+backup after inspecting the snapshot.

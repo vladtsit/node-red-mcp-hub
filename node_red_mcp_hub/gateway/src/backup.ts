@@ -1,0 +1,36 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { TargetConfig } from "./config.js";
+import type { NodeRedClient } from "./node-red.js";
+
+export class BackupError extends Error {}
+
+export class BackupManager {
+  constructor(private readonly directory: string, private readonly retain: number) {}
+
+  async capture(target: TargetConfig, client: NodeRedClient, tool: string): Promise<void> {
+    const targetDir = join(this.directory, target.id);
+    const stamp = new Date().toISOString().replaceAll(":", "-");
+    const name = `${stamp}-${tool}-${randomUUID()}.json`;
+    const finalPath = join(targetDir, name);
+    const temporaryPath = join(targetDir, `.${name}.${randomUUID()}.tmp`);
+    try {
+      const flows = await client.getFlowsForBackup();
+      await mkdir(targetDir, { recursive: true, mode: 0o700 });
+      await writeFile(temporaryPath, JSON.stringify({ created_at: new Date().toISOString(), server_id: target.id, tool, flows }), { mode: 0o600, flag: "wx" });
+      await rename(temporaryPath, finalPath);
+      const files = (await readdir(targetDir)).filter((item) => item.endsWith(".json")).sort().reverse();
+      await Promise.all(files.slice(this.retain).map(async (item) => {
+        try { await unlink(join(targetDir, item)); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }));
+    } catch (error) {
+      try { await unlink(temporaryPath); } catch {}
+      const detail = error instanceof Error ? error.message : "unknown error";
+      throw new BackupError(`Could not create pre-write backup: ${detail}`);
+    }
+  }
+}

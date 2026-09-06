@@ -5,6 +5,7 @@ export const MAX_BODY_BYTES = 10 * 1024 * 1024;
 export const REQUEST_TIMEOUT_MS = 15_000;
 export const MAX_IN_FLIGHT = 20;
 const SUPERVISOR_DISCOVERY_TIMEOUT_MS = 5_000;
+export const DEFAULT_BACKUP_DIR = "/data/backups";
 
 export type AuthMode = "credentials" | "bearer" | "basic" | "none";
 
@@ -18,11 +19,17 @@ export interface TargetConfig {
   password?: string;
   token?: string;
   readOnly: boolean;
+  disabledTools: Set<string>;
 }
 
 export interface GatewayConfig {
   pathSecret: string;
   readOnly: boolean;
+  redactSecrets: boolean;
+  backupBeforeWrite: boolean;
+  backupRetain: number;
+  backupDir: string;
+  disabledTools: Set<string>;
   servers: Map<string, TargetConfig>;
 }
 
@@ -31,12 +38,18 @@ type RawOptions = {
   read_only?: unknown;
   servers?: unknown;
   home_assistant_node_red?: unknown;
+  redact_secrets?: unknown;
+  backup_before_write?: unknown;
+  backup_retain?: unknown;
+  disabled_tools?: unknown;
 };
 
 type LocalNodeRedOptions = {
   enabled: boolean;
-  token?: string;
   url?: string;
+  username?: string;
+  password?: string;
+  readOnly: boolean;
 };
 
 type SupervisorFetch = (input: string, init?: RequestInit) => Promise<Response>;
@@ -44,6 +57,11 @@ type SupervisorFetch = (input: string, init?: RequestInit) => Promise<Response>;
 const ID = /^[a-z][a-z0-9_-]{0,31}$/;
 const SECRET = /^[a-f0-9]{64}$/i;
 const AUTH_MODES = new Set<AuthMode>(["credentials", "bearer", "basic", "none"]);
+const TOOL_NAMES = new Set([
+  "list_servers", "check_servers", "list_flows", "search_nodes", "get_flows", "get_flow",
+  "get_settings", "get_diagnostics", "get_flow_state", "get_installed_modules", "create_flow",
+  "update_flow", "delete_flow", "deploy_flows",
+]);
 
 function fail(message: string): never {
   throw new Error(`Invalid add-on options: ${message}`);
@@ -79,7 +97,7 @@ function optionalString(value: unknown, field: string): string | undefined {
 
 function localNodeRedOptions(input: RawOptions): LocalNodeRedOptions {
   if (input.home_assistant_node_red === undefined || input.home_assistant_node_red === null) {
-    return { enabled: true };
+    return { enabled: false, readOnly: true };
   }
   if (typeof input.home_assistant_node_red !== "object" || Array.isArray(input.home_assistant_node_red)) {
     fail("home_assistant_node_red must be an object");
@@ -88,11 +106,41 @@ function localNodeRedOptions(input: RawOptions): LocalNodeRedOptions {
   if (value.enabled !== undefined && typeof value.enabled !== "boolean") {
     fail("home_assistant_node_red.enabled must be a boolean");
   }
+  if (value.read_only !== undefined && typeof value.read_only !== "boolean") {
+    fail("home_assistant_node_red.read_only must be a boolean");
+  }
   return {
-    enabled: value.enabled !== false,
-    token: optionalString(value.token, "home_assistant_node_red.token"),
+    enabled: value.enabled === true,
     url: optionalString(value.url, "home_assistant_node_red.url"),
+    username: optionalString(value.username, "home_assistant_node_red.username"),
+    password: optionalString(value.password, "home_assistant_node_red.password"),
+    readOnly: value.read_only !== false,
   };
+}
+
+function boolOption(value: unknown, field: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") fail(`${field} must be a boolean`);
+  return value;
+}
+
+function intOption(value: unknown, field: string, fallback: number, min: number, max: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) {
+    fail(`${field} must be an integer from ${min} to ${max}`);
+  }
+  return value as number;
+}
+
+function toolSet(value: unknown, field: string): Set<string> {
+  if (value === undefined || value === null || value === "") return new Set();
+  if (typeof value !== "string") fail(`${field} must be a comma-separated string`);
+  const tools = new Set(value.split(",").map((item) => item.trim()).filter(Boolean));
+  for (const tool of tools) {
+    if (!TOOL_NAMES.has(tool)) fail(`${field} contains unknown tool ${tool}`);
+    if (tool === "list_servers") fail(`${field} cannot disable the mandatory list_servers tool`);
+  }
+  return tools;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -116,16 +164,25 @@ function localNodeRedCandidate(addons: unknown): Record<string, unknown> | undef
   return candidates.find((addon) => addon.state === "started") ?? candidates[0];
 }
 
-function discoveredUrl(info: Record<string, unknown>): string | undefined {
+function primaryIpv4(info: Record<string, unknown> | undefined): string | undefined {
+  const interfaces = Array.isArray(info?.interfaces) ? info.interfaces.map(record) : [];
+  const primary = interfaces.find((item) => item?.primary === true);
+  const ipv4 = record(primary?.ipv4);
+  const addresses = Array.isArray(ipv4?.address) ? ipv4.address : [];
+  const value = addresses.find((item) => typeof item === "string" && /^\d{1,3}(?:\.\d{1,3}){3}(?:\/\d{1,2})?$/.test(item));
+  return typeof value === "string" ? value.split("/", 1)[0] : undefined;
+}
+
+function discoveredUrl(info: Record<string, unknown>, hostAddress?: string): string | undefined {
   const address = typeof info.ip_address === "string" ? info.ip_address : undefined;
   if (!address) return undefined;
   const network = record(info.network);
   const configuredPort = network?.["80/tcp"];
-  const port = typeof configuredPort === "number" || typeof configuredPort === "string"
-    ? Number(configuredPort)
-    : info.host_network === true ? 1880 : 80;
+  const publishedPort = typeof configuredPort === "number" || typeof configuredPort === "string" ? Number(configuredPort) : undefined;
+  const usePublishedPort = Number.isInteger(publishedPort) && publishedPort! >= 1 && publishedPort! <= 65_535 && typeof hostAddress === "string";
+  const port = usePublishedPort ? publishedPort! : 80;
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
-  return `http://${address}:${port}`;
+  return `http://${usePublishedPort ? hostAddress : address}:${port}`;
 }
 
 async function supervisorJson(path: string, token: string, request: SupervisorFetch): Promise<Record<string, unknown> | undefined> {
@@ -147,9 +204,10 @@ async function supervisorJson(path: string, token: string, request: SupervisorFe
 }
 
 /**
- * Add the official Home Assistant Node-RED app as a read-only target when it
- * is available. A user-provided Home Assistant access token is deliberately
- * required: the hub never reads another app's options or credentials.
+ * Add the Home Assistant Community Node-RED app as a read-only target when it
+ * is available. Supervisor metadata supplies only the URL; the user supplies
+ * Home Assistant Basic credentials because the official proxy does not accept
+ * long-lived bearer tokens.
  */
 export async function discoverHomeAssistantNodeRed(
   input: RawOptions,
@@ -157,28 +215,33 @@ export async function discoverHomeAssistantNodeRed(
   supervisorToken = process.env.SUPERVISOR_TOKEN,
 ): Promise<RawOptions> {
   const local = localNodeRedOptions(input);
-  if (!local.enabled || !local.token) return input;
+  if (!local.enabled) return input;
+  if (!local.username || !local.password) {
+    fail("home_assistant_node_red requires username and password when enabled");
+  }
   const manualServers = Array.isArray(input.servers) ? input.servers : [];
   const ids = new Set(manualServers.flatMap((server) => {
     const value = record(server);
     return typeof value?.id === "string" ? [value.id] : [];
   }));
-  if (ids.has("home_assistant_node_red") || manualServers.length >= 20) return input;
+  if (ids.has("home_assistant_node_red")) return input;
+  if (manualServers.length >= 20) fail("home_assistant_node_red cannot be added because servers already contains 20 targets");
 
   let baseUrl = local.url;
   let name = "Home Assistant Node-RED";
   if (!baseUrl) {
-    if (!supervisorToken) return input;
+    if (!supervisorToken) fail("home_assistant_node_red could not discover Node-RED; set its url explicitly");
     const addons = await supervisorJson("/addons", supervisorToken, request);
     const addon = localNodeRedCandidate(addons?.addons);
     const slug = typeof addon?.slug === "string" ? addon.slug : undefined;
-    if (!slug) return input;
+    if (!slug) fail("home_assistant_node_red could not find an installed Node-RED app");
     const info = await supervisorJson(`/addons/${encodeURIComponent(slug)}/info`, supervisorToken, request);
-    if (!info) return input;
-    baseUrl = discoveredUrl(info);
+    if (!info) fail("home_assistant_node_red could not read Node-RED app metadata");
+    const network = await supervisorJson("/network/info", supervisorToken, request);
+    baseUrl = discoveredUrl(info, primaryIpv4(network));
     if (typeof info.name === "string" && info.name) name = info.name;
   }
-  if (!baseUrl) return input;
+  if (!baseUrl) fail("home_assistant_node_red could not determine the Node-RED Admin API URL");
 
   return {
     ...input,
@@ -188,9 +251,10 @@ export async function discoverHomeAssistantNodeRed(
         id: "home_assistant_node_red",
         name,
         url: baseUrl,
-        auth_mode: "bearer",
-        token: local.token,
-        read_only: true,
+        auth_mode: "basic",
+        username: local.username,
+        password: local.password,
+        read_only: local.readOnly,
       },
     ],
   };
@@ -219,16 +283,26 @@ export function parseConfig(input: RawOptions): GatewayConfig {
     const username = stringField(row.username, `${field}.username`, false);
     const password = stringField(row.password, `${field}.password`, false);
     const token = stringField(row.token, `${field}.token`, false);
+    const disabledTools = toolSet(row.disabled_tools, `${field}.disabled_tools`);
     if ((authMode === "credentials" || authMode === "basic") && (!username || !password)) {
       fail(`${field} requires username and password for ${authMode} authentication`);
     }
     if (authMode === "bearer" && !token) fail(`${field} requires token for bearer authentication`);
     servers.set(id, {
       id, name, baseUrl: targetUrl(stringField(row.url, `${field}.url`)!, `${field}.url`), authMode,
-      username, password, token, readOnly: row.read_only === true,
+      username, password, token, readOnly: row.read_only === true, disabledTools,
     });
   }
-  return { pathSecret, readOnly: input.read_only, servers };
+  return {
+    pathSecret,
+    readOnly: input.read_only,
+    redactSecrets: boolOption(input.redact_secrets, "redact_secrets", true),
+    backupBeforeWrite: boolOption(input.backup_before_write, "backup_before_write", true),
+    backupRetain: intOption(input.backup_retain, "backup_retain", 20, 1, 1000),
+    backupDir: process.env.BACKUP_DIR ?? DEFAULT_BACKUP_DIR,
+    disabledTools: toolSet(input.disabled_tools, "disabled_tools"),
+    servers,
+  };
 }
 
 export async function loadConfig(optionsPath = process.env.OPTIONS_PATH ?? "/run/node-red-mcp-hub/options.json"): Promise<GatewayConfig> {

@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   gateway:
     runs-on: ubuntu-latest
@@ -11,16 +14,44 @@ jobs:
       run:
         working-directory: node_red_mcp_hub/gateway
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: node_red_mcp_hub/gateway/package-lock.json
       - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Verify release version consistency
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          grep -qx "version: ${VERSION}" ../config.yaml
+          grep -qx "ARG BUILD_VERSION=${VERSION}" ../Dockerfile
+          grep -q "\"${VERSION}\"" src/version.ts
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: javascript-typescript
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: node_red_mcp_hub/gateway/package-lock.json
+      - run: npm ci
+        working-directory: node_red_mcp_hub/gateway
+      - run: npm run build
+        working-directory: node_red_mcp_hub/gateway
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
 
   addon-images:
     runs-on: ubuntu-latest
@@ -29,13 +60,17 @@ jobs:
       matrix:
         arch: [amd64, aarch64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - run: docker buildx build --platform linux/${{ matrix.arch }} --build-arg BUILD_ARCH=${{ matrix.arch }} -t node-red-mcp-hub:${{ matrix.arch }} -f node_red_mcp_hub/Dockerfile node_red_mcp_hub --load
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build app image
+        run: |
+          VERSION="$(node -p "require('./node_red_mcp_hub/gateway/package.json').version")"
+          docker buildx build --platform linux/${{ matrix.arch }} --build-arg BUILD_ARCH=${{ matrix.arch }} --build-arg BUILD_VERSION="${VERSION}" -t node-red-mcp-hub:${{ matrix.arch }} -f node_red_mcp_hub/Dockerfile node_red_mcp_hub --load
       - name: Start app and check watchdog
         run: |
-          docker run --rm --detach --name node-red-mcp-hub-smoke --publish 51844:51844 --mount type=bind,src="$GITHUB_WORKSPACE/node_red_mcp_hub/test/options.json",dst=/data/options.json,readonly node-red-mcp-hub:${{ matrix.arch }}
+          trap 'docker rm --force node-red-mcp-hub-smoke >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name node-red-mcp-hub-smoke --publish 51844:51844 --mount type=bind,src="$GITHUB_WORKSPACE/node_red_mcp_hub/test/options.json",dst=/data/options.json,readonly node-red-mcp-hub:${{ matrix.arch }}
           for attempt in {1..20}; do
             if curl --fail --silent http://127.0.0.1:51844/healthz; then exit 0; fi
             sleep 1

@@ -1,0 +1,28 @@
+configuration:
+  mcp_path_secret:
+    name: MCP path secret
+    description: Generated automatically on first start. Treat the resulting private URL as a password.
+  mcp_url:
+    name: MCP URL
+    description: Generated copyable LAN URL. This field is managed by the app.
+  read_only:
+    name: Global read-only mode
+    description: Hides and blocks every write tool. Keep enabled unless MCP clients must modify flows.
+  redact_secrets:
+    name: Redact flow secrets
+    description: Redacts recognized credential and secret fields. Function code may still contain sensitive values.
+  backup_before_write:
+    name: Back up before writes
+    description: Saves the current flow graph privately under the app data directory before every write.
+  backup_retain:
+    name: Backups retained per server
+    description: Maximum number of automatic pre-write snapshots retained for each Node-RED server.
+  disabled_tools:
+    name: Globally disabled tools
+    description: Optional comma-separated MCP tool names to omit from discovery.
+  home_assistant_node_red:
+    name: Home Assistant Node-RED
+    description: Optionally discover the local app URL and connect with Home Assistant HTTP Basic credentials.
+  servers:
+    name: Additional Node-RED servers
+    description: One to twenty directly reachable Node-RED Admin API targets.
