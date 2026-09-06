@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.7
+
+### Added
+
+- Expanded the agent instructions with the flow-authoring rules that fail
+  silently when broken: `update_flow` replaces a tab wholesale so omitted
+  nodes and a dropped `configs` array are deleted, `[redacted]` values from a
+  read must never be written back, node ids must be unique runtime-wide, and
+  writes should be verified by re-reading. Added reliability guidance on catch
+  nodes, function node error reporting, and disabling nodes instead of
+  deleting them.
+
 ## 0.3.6
 
 ### Added

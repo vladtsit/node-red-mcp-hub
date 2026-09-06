@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.7 - 2026-09-06
+
+### Added
+
+- Substantially expanded the MCP server `instructions` with the flow-authoring
+  rules whose violations fail silently: `update_flow` replaces a tab's entire
+  contents (so any omitted node is deleted, and dropping the separate
+  `configs` array breaks every node referencing those config nodes), a
+  `[redacted]` value from a read must never be written back (it would replace
+  the real secret with that literal string), node ids must be unique across
+  the whole runtime, and a node's `z` must match its tab. Added guidance to
+  verify writes by re-reading, to not blindly retry a timed-out write, and to
+  build more reliable flows using catch nodes, `node.error(err, msg)` in
+  function nodes, and `"d": true` to disable rather than delete a node.
+- `update_flow`'s tool description now also carries the tab-replacement and
+  redaction warnings, so they are visible at the call site.
+
 ## 0.3.6 - 2026-09-06
 
 ### Added

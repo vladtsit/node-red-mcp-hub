@@ -33,34 +33,78 @@ async function parseJson(request: IncomingMessage): Promise<unknown> {
   catch { throw new Error("invalid_json"); }
 }
 
-const AGENT_INSTRUCTIONS = `Before any create_flow, update_flow, or delete_flow call, describe the exact
-change (which nodes/tabs are added, modified, or removed) and get explicit
-confirmation from the user first. Never delete or overwrite a flow the user
-has not specifically agreed to change.
+const AGENT_INSTRUCTIONS = `This hub exposes Node-RED Admin APIs. Flows can contain code and credentials,
+and every write takes effect immediately on a live system.
 
-When developing or modifying flows:
-- Inspect current state first with list_flows/get_flow/search_nodes before
-  writing; avoid get_flows for a full export unless truly needed, since it can
-  be large and may contain sensitive Function code.
+Confirm before writing
+- Before any create_flow, update_flow, delete_flow, or deploy_flows call,
+  describe the exact change (which nodes/tabs are added, modified, or
+  removed) and get explicit confirmation from the user first. Never delete or
+  overwrite a flow the user has not specifically agreed to change.
+
+Read before you write
+- Inspect current state with list_flows/get_flow/search_nodes first; avoid
+  get_flows for a full export unless truly needed, since it is large and may
+  contain sensitive Function code.
 - Only use node "type"s confirmed available via get_installed_modules or
   search_nodes; never invent a type that may not be installed.
 - Prefer update_flow scoped to the one affected tab over deploy_flows (a full
   graph deploy) unless the change genuinely spans multiple tabs.
+
+update_flow replaces the entire tab
+- Every existing node whose "z" is that tab and that you omit from your
+  payload is permanently deleted. Never send a partial node list: get_flow
+  first, apply your change to the object it returns, and send every node
+  back.
+- Preserve the tab's other top-level properties ("label", "info", "disabled",
+  "env") and its separate "configs" array. Dropping "configs" deletes the
+  tab's config nodes (broker/server/credential nodes referenced by id from
+  other nodes) and breaks everything that referenced them.
+
+Never write back redacted values
+- Reads redact secrets: "credentials" objects and password/token/secret-like
+  properties come back as the literal string "[redacted]", and the response
+  sets redacted_credentials/redacted_secrets when that happened. Sending that
+  placeholder back would overwrite the real secret with the string
+  "[redacted]". Remove those keys from your payload instead; Node-RED keeps
+  the stored credentials of any node whose "credentials" property is absent.
+
+Node object rules
+- "wires" MUST be an array of arrays: one inner array per output port, each
+  holding that port's target ids, e.g. [["<targetId>"]] for a single output
+  wired to one target, or [] for no outputs. A flattened ["<targetId>"] is
+  invalid and fails silently: Node-RED iterates the characters of the id
+  string as targets, so the source node still fires but nothing downstream
+  ever receives a message and no error is reported anywhere.
+- Every node "id" must be unique across the whole runtime, not just the tab.
+  Generate a fresh random 16-character lowercase hex id; never reuse or guess
+  one.
+- Set every node's "z" to the tab id, and forward properties you do not
+  recognise unchanged rather than rebuilding nodes from scratch.
+- Config nodes are the ones with no "x"/"y"; other nodes reference them by id.
 - Give new nodes a descriptive "name" and lay them out left-to-right
   (increasing x) with clear y spacing so the flow stays readable.
-- When adding a node meant only for manual testing, use an inject node with
-  "once": false and no "repeat"/"crontab" so it never fires on its own.
+
+Building reliable flows
+- Add a catch node so runtime errors surface instead of failing silently, and
+  scope it to the nodes it should cover.
+- Keep function node code small, always return msg (or null to stop), and
+  report failures with node.error(err, msg) so a catch node can handle them.
+- For manual testing use an inject node with "once": false and no
+  "repeat"/"crontab" so it never fires on its own; a debug node with
+  "tostatus": true also shows its last value on the canvas.
+- To take a node out of service temporarily set "d": true to disable it
+  rather than deleting it.
+
+After writing
 - create_flow/update_flow already redeploy the modified flow automatically;
-  no extra deploy step is needed after them.
-- A node's "wires" property MUST be an array of arrays: one inner array per
-  output port, each containing the target node ids for that port, e.g.
-  [["<targetId>"]] for a single-output node wired to one target, or [] for no
-  outputs. A flattened ["<targetId>"] is invalid and fails silently: Node-RED
-  iterates it as individual characters of the id string instead of real
-  targets, so the source node still fires but nothing downstream ever
-  receives a message and no error is shown. Always verify this shape (and
-  the shape of any generated JSON in general) before calling create_flow or
-  update_flow.`;
+  no extra deploy step is needed.
+- Re-read with get_flow and confirm the change landed as intended, especially
+  "wires", which fails silently when malformed.
+- If a write fails or times out, do NOT blindly retry: it may already have
+  been applied. Read the flow first to establish the actual state.
+- deploy_flows needs the "rev" from get_flows; a stale rev returns HTTP 409.
+  Re-read and re-apply rather than trying to force it.`;
 
 function createMcpServer(config: GatewayConfig, runtime: GatewayRuntime): McpServer {
   const mcp = new McpServer({ name: "node-red-mcp-hub", version: APP_VERSION }, { instructions: AGENT_INSTRUCTIONS });

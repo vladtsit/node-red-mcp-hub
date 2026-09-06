@@ -143,18 +143,28 @@ deploy.
 
 The server advertises MCP `instructions` telling a connected agent to read
 current flow state before writing, use only node types confirmed installed,
-prefer scoped `update_flow` over a full `deploy_flows`, and — most importantly —
-always describe the exact change and get explicit user confirmation before
-calling `create_flow`, `update_flow`, `delete_flow`, or `deploy_flows`. This is
-guidance surfaced to the connecting agent, not a technical restriction enforced
-by the hub; `read_only` remains the actual access control.
+prefer scoped `update_flow` over a full `deploy_flows`, verify the result
+afterward, and — most importantly — always describe the exact change and get
+explicit user confirmation before calling `create_flow`, `update_flow`,
+`delete_flow`, or `deploy_flows`. This is guidance surfaced to the connecting
+agent, not a technical restriction enforced by the hub; `read_only` remains
+the actual access control.
 
-The instructions also call out a specific, easy-to-get-wrong node property:
-`wires` must be an array of arrays, one per output port (e.g. `[["targetId"]]`
-for a single output wired to one target, `[]` for none). A flattened
-`["targetId"]` is accepted by Node-RED without error, but the source node
-fires while nothing downstream ever receives a message — this fails
-completely silently with no error anywhere.
+Those instructions call out three failure modes that are silent and therefore
+easy for an agent to cause without noticing:
+
+- `update_flow` replaces the tab's entire contents. Any node belonging to that
+  tab which is missing from the payload is deleted, and dropping the separate
+  `configs` array removes the tab's config nodes and breaks every node that
+  referenced them. An agent must `get_flow` first and send everything back.
+- `wires` must be an array of arrays, one per output port (for example
+  `[["targetId"]]`, or `[]` for none). A flattened `["targetId"]` is accepted
+  without error, but the source node fires while nothing downstream receives
+  anything.
+- Redacted reads return the literal string `[redacted]`. Writing that back
+  replaces the real secret with that string, so the property must be omitted
+  instead; Node-RED retains stored credentials for nodes that do not supply
+  them.
 
 `deploy_flows` needs the `rev` returned by `get_flows` and passes it straight
 to Node-RED. A stale revision is returned as Node-RED's HTTP 409; the hub never
