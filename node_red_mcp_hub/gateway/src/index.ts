@@ -49,7 +49,11 @@ Read before you write
 - Only use node "type"s confirmed available via get_installed_modules or
   search_nodes; never invent a type that may not be installed.
 - Prefer update_flow scoped to the one affected tab over deploy_flows (a full
-  graph deploy) unless the change genuinely spans multiple tabs.
+  graph deploy) unless the change genuinely spans multiple tabs. Prefer
+  patch_flow over update_flow when you are only adding, changing, or removing
+  a few nodes: it merges your add/update/remove lists against a fresh read
+  server-side, so untouched nodes and config nodes are preserved
+  automatically and its response never contains full flow content.
 
 update_flow replaces the entire tab
 - Every existing node whose "z" is that tab and that you omit from your
@@ -70,6 +74,12 @@ Never write back redacted values
   the stored credentials of any node whose "credentials" property is absent.
 
 Node object rules
+- create_flow, update_flow, patch_flow, and deploy_flows validate the payload
+  before writing and reject it with VALIDATION_FAILED (no request reaches
+  Node-RED) if wires is not an array of arrays, a node id is duplicated, a
+  wire targets an unknown id, or the literal string "[redacted]" appears
+  anywhere in the payload. Still follow the rules below; validation catches
+  the mistake but does not fix it for you.
 - "wires" MUST be an array of arrays: one inner array per output port, each
   holding that port's target ids, e.g. [["<targetId>"]] for a single output
   wired to one target, or [] for no outputs. A flattened ["<targetId>"] is

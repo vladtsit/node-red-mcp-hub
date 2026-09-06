@@ -1,4 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { REQUEST_TIMEOUT_MS, MAX_BODY_BYTES, type TargetConfig } from "./config.js";
+import { findRedactedLeaks, isPlainObject, validateNodes } from "./flow-validate.js";
 
 export class UpstreamError extends Error {
   constructor(
@@ -8,6 +10,10 @@ export class UpstreamError extends Error {
     readonly code = "UPSTREAM_ERROR",
     readonly retryable = false,
   ) { super(message); }
+}
+
+export class FlowValidationError extends Error {
+  constructor(readonly issues: string[]) { super(`Flow validation failed: ${issues.join("; ")}`); }
 }
 
 type CachedToken = { value: string; expiresAt: number };
@@ -240,6 +246,31 @@ export class NodeRedClient {
       ? (settings as Record<string, unknown>).version : undefined;
     return { ok: true, latency_ms: Math.round(performance.now() - started), ...(version ? { version } : {}) };
   }
+  async getAllNodeIds(): Promise<Set<string>> {
+    const document = flowDocument(await this.getFlowsRaw());
+    return new Set(document.flows.map((node) => (typeof node.id === "string" ? node.id : undefined)).filter((id): id is string => !!id));
+  }
+  private collectNodesForTabPayload(flow: unknown): Record<string, unknown>[] {
+    if (!isPlainObject(flow)) return [];
+    const nodes = Array.isArray(flow.nodes) ? flow.nodes : [];
+    const configs = Array.isArray(flow.configs) ? flow.configs : [];
+    return [...nodes, ...configs].filter(isPlainObject);
+  }
+  private hasWireTargets(nodes: Record<string, unknown>[]): boolean {
+    return nodes.some((node) => Array.isArray(node.wires) && node.wires.some((port) => Array.isArray(port) && port.length > 0));
+  }
+  private async validateTabWrite(flow: unknown, tabId?: string): Promise<void> {
+    const nodes = this.collectNodesForTabPayload(flow);
+    const knownIds = this.hasWireTargets(nodes) ? await this.getAllNodeIds() : undefined;
+    const issues = [...findRedactedLeaks(flow), ...validateNodes(nodes, { tabId, knownIds })].filter((issue) => issue.level === "error");
+    if (issues.length) throw new FlowValidationError(issues.map((issue) => issue.message));
+  }
+  private validateDeployPayload(flows: unknown): void {
+    const nodes = Array.isArray(flows) ? flows.filter(isPlainObject) : [];
+    const knownIds = new Set(nodes.map((node) => (typeof node.id === "string" ? node.id : undefined)).filter((id): id is string => !!id));
+    const issues = [...findRedactedLeaks(flows), ...validateNodes(nodes, { knownIds, allowContainerTypes: true })].filter((issue) => issue.level === "error");
+    if (issues.length) throw new FlowValidationError(issues.map((issue) => issue.message));
+  }
   /**
    * POST /flow and PUT /flow/:id only perform a targeted "nodes" reload of the
    * affected tab. In practice new nodes it adds (e.g. a new debug node) can be
@@ -255,18 +286,80 @@ export class NodeRedClient {
     await this.request("/flows", "POST", { flows: current.flows, rev: current.rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": "flows" }, true);
   }
   async createFlow(flow: unknown) {
+    await this.validateTabWrite(flow);
     const result = await this.request("/flow", "POST", flow, undefined, true);
     await this.redeployModifiedFlows();
     return result;
   }
   async updateFlow(id: string, flow: unknown) {
+    await this.validateTabWrite(flow, id);
     const result = await this.request(`/flow/${flowPathSegment(id)}`, "PUT", flow, undefined, true);
     await this.redeployModifiedFlows();
     return result;
   }
   deleteFlow(id: string) { return this.request(`/flow/${flowPathSegment(id)}`, "DELETE", undefined, undefined, true); }
   deployFlows(flows: unknown, rev: string, deploymentType: "nodes" | "flows" | "full") {
+    this.validateDeployPayload(flows);
     return this.request("/flows", "POST", { flows, rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": deploymentType }, true);
+  }
+  private async getFlowRaw(id: string): Promise<Record<string, unknown>> {
+    const data = await this.request(`/flow/${flowPathSegment(id)}`);
+    if (!isPlainObject(data)) throw new UpstreamError("Node-RED returned an invalid flow document", undefined, false, "UPSTREAM_INVALID_RESPONSE");
+    return data;
+  }
+  /**
+   * Merges add/update/remove against a freshly (unredacted) read flow so
+   * untouched nodes are preserved automatically and never round-trips actual
+   * secret values through the caller: only an id-level diff is returned.
+   */
+  async patchFlow(id: string, patch: { add?: unknown[]; update?: unknown[]; remove?: string[] }) {
+    const current = await this.getFlowRaw(id);
+    const currentNodes = Array.isArray(current.nodes) ? current.nodes.filter(isPlainObject) : [];
+    const currentConfigs = Array.isArray(current.configs) ? current.configs.filter(isPlainObject) : [];
+    const nodesById = new Map(currentNodes.map((node) => [String(node.id), node]));
+    const configsById = new Map(currentConfigs.map((node) => [String(node.id), node]));
+    const existingIds = new Set([...nodesById.keys(), ...configsById.keys()]);
+
+    const removed: string[] = [];
+    const notFound: string[] = [];
+    for (const removeId of patch.remove ?? []) {
+      if (nodesById.delete(removeId) || configsById.delete(removeId)) removed.push(removeId);
+      else notFound.push(`Cannot remove node "${removeId}": not found in this flow.`);
+    }
+
+    const updated: string[] = [];
+    for (const item of patch.update ?? []) {
+      if (!isPlainObject(item) || typeof item.id !== "string") throw new FlowValidationError(['Each "update" item must be an object with a string "id".']);
+      const store = nodesById.has(item.id) ? nodesById : configsById.has(item.id) ? configsById : undefined;
+      if (!store) { notFound.push(`Cannot update node "${item.id}": not found in this flow.`); continue; }
+      store.set(item.id, { ...store.get(item.id), ...item });
+      updated.push(item.id);
+    }
+    if (notFound.length) throw new FlowValidationError(notFound);
+
+    const added: string[] = [];
+    for (const item of patch.add ?? []) {
+      if (!isPlainObject(item)) throw new FlowValidationError(['Each "add" item must be an object.']);
+      const nodeId = typeof item.id === "string" && item.id ? item.id : randomBytes(8).toString("hex");
+      if (existingIds.has(nodeId)) throw new FlowValidationError([`Cannot add node "${nodeId}": id already exists in this flow.`]);
+      const node: Record<string, unknown> = { ...item, id: nodeId, z: id };
+      const hasCoords = typeof node.x === "number" && typeof node.y === "number";
+      (hasCoords ? nodesById : configsById).set(nodeId, node);
+      existingIds.add(nodeId);
+      added.push(nodeId);
+    }
+
+    const newFlow: Record<string, unknown> = { id, label: current.label };
+    for (const key of ["info", "disabled", "env"]) if (key in current) newFlow[key] = current[key];
+    newFlow.nodes = [...nodesById.values()];
+    newFlow.configs = [...configsById.values()];
+
+    await this.updateFlow(id, newFlow);
+    return {
+      added, updated, removed,
+      node_count_before: currentNodes.length + currentConfigs.length,
+      node_count_after: nodesById.size + configsById.size,
+    };
   }
   async getSettings() {
     const settings = await this.request("/settings");

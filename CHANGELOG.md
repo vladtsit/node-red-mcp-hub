@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.8 - 2026-09-06
+
+### Added
+
+- `create_flow`, `update_flow`, and `deploy_flows` now validate the payload
+  before writing anything to Node-RED, rejecting it with a `VALIDATION_FAILED`
+  error instead of letting Node-RED silently accept a broken write: a
+  flattened `wires` value, a duplicate node id within the payload, a wire
+  that targets an id that does not exist anywhere in the current graph or
+  the payload, and a literal `"[redacted]"` string anywhere in the payload
+  are all now caught server-side.
+- Added `patch_flow`, a safer alternative to `update_flow` for incremental
+  changes. It takes `add`/`update`/`remove` node lists, merges them
+  server-side against a freshly read, unredacted copy of the target tab
+  (preserving every node and config node not mentioned), validates the
+  merged result the same way as the tools above, and writes it back. Its
+  response is only a compact `{ added, updated, removed, node_count_before,
+  node_count_after }` diff of node ids — never full flow content — so secret
+  values read internally for the merge are never echoed back to the calling
+  agent.
+- Updated the MCP server `instructions` and tool descriptions to mention the
+  new validation and to recommend `patch_flow` over `update_flow` for
+  incremental changes.
+
 ## 0.3.7 - 2026-09-06
 
 ### Added

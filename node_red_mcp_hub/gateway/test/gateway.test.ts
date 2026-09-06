@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { parseConfig } from "../src/config.js";
 import { createGateway } from "../src/index.js";
-import { NodeRedClient, UpstreamError } from "../src/node-red.js";
+import { NodeRedClient, UpstreamError, FlowValidationError } from "../src/node-red.js";
 
 async function start(server: ReturnType<typeof createServer>) {
   server.listen(0, "127.0.0.1");
@@ -218,6 +218,96 @@ test("native writes preserve payloads, redeploy the modified flow, and expose No
   assert.deepEqual(seen[2], { method: "POST", path: "/flows", body: { flows: [], rev: "server-rev" }, deployment: "flows" });
   await assert.rejects(() => client.deployFlows([], "old-rev", "flows"), (error: unknown) => error instanceof UpstreamError && error.status === 409);
   assert.deepEqual(seen.at(-1), { method: "POST", path: "/flows", body: { flows: [], rev: "old-rev" }, deployment: "flows" });
+});
+
+test("server-side validation rejects malformed wires, duplicate ids, and redacted-value round-trips before writing", async (t) => {
+  let writes = 0;
+  const target = await start(createServer((request, response) => {
+    if (request.url === "/flows" && request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: [{ id: "tab-1", type: "tab" }] }));
+      return;
+    }
+    writes += 1;
+    response.writeHead(204).end();
+  }));
+  t.after(target.close);
+  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "none", readOnly: false, disabledTools: new Set() });
+
+  await assert.rejects(
+    () => client.updateFlow("tab-1", { id: "tab-1", nodes: [{ id: "a", type: "inject", z: "tab-1", wires: ["b"] }] }),
+    (error: unknown) => error instanceof FlowValidationError && /flattened/.test(error.message),
+  );
+  await assert.rejects(
+    () => client.updateFlow("tab-1", { id: "tab-1", nodes: [{ id: "a", type: "inject", z: "tab-1" }, { id: "a", type: "debug", z: "tab-1" }] }),
+    (error: unknown) => error instanceof FlowValidationError && /Duplicate node id/.test(error.message),
+  );
+  await assert.rejects(
+    () => client.updateFlow("tab-1", { id: "tab-1", nodes: [{ id: "a", type: "inject", z: "tab-1", topic: "[redacted]" }] }),
+    (error: unknown) => error instanceof FlowValidationError && /\[redacted\]/.test(error.message),
+  );
+  await assert.rejects(
+    () => client.updateFlow("tab-1", { id: "tab-1", nodes: [{ id: "a", type: "inject", z: "tab-1", wires: [["missing-target"]] }] }),
+    (error: unknown) => error instanceof FlowValidationError && /unknown node id/.test(error.message),
+  );
+  assert.equal(writes, 0);
+
+  await client.updateFlow("tab-1", { id: "tab-1", nodes: [{ id: "a", type: "inject", z: "tab-1", wires: [["b"]] }, { id: "b", type: "debug", z: "tab-1" }] });
+  assert.ok(writes > 0);
+});
+
+test("patch_flow merges add/update/remove against an unredacted read and never returns flow content", async (t) => {
+  const flowStore: Record<string, unknown> = {
+    id: "tab-1", label: "Test",
+    nodes: [
+      { id: "keep", type: "debug", z: "tab-1", x: 100, y: 100 },
+      { id: "gone", type: "debug", z: "tab-1", x: 100, y: 200 },
+      { id: "old", type: "inject", z: "tab-1", x: 100, y: 300, name: "Old Name" },
+    ],
+    configs: [{ id: "cfg-1", type: "mqtt-broker", credentials: { password: "real-secret" } }],
+  };
+  const target = await start(createServer(async (request, response) => {
+    if (request.url === "/flow/tab-1" && request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(flowStore));
+      return;
+    }
+    if (request.url === "/flow/tab-1" && request.method === "PUT") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      Object.assign(flowStore, JSON.parse(Buffer.concat(chunks).toString()));
+      response.writeHead(204).end();
+      return;
+    }
+    if (request.url === "/flows" && request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: [] }));
+      return;
+    }
+    response.writeHead(204).end();
+  }));
+  t.after(target.close);
+  const client = new NodeRedClient({ id: "fixture", name: "Fixture", baseUrl: new URL(target.url), authMode: "none", readOnly: false, disabledTools: new Set() });
+
+  const diff = await client.patchFlow("tab-1", {
+    remove: ["gone"],
+    update: [{ id: "old", name: "New Name" }],
+    add: [{ type: "debug", x: 100, y: 400 }],
+  }) as { added: string[]; updated: string[]; removed: string[]; node_count_before: number; node_count_after: number };
+
+  assert.equal(diff.removed.length, 1);
+  assert.equal(diff.updated.length, 1);
+  assert.equal(diff.added.length, 1);
+  assert.equal(diff.node_count_before, 4);
+  assert.equal(diff.node_count_after, 4);
+  assert.doesNotMatch(JSON.stringify(diff), /real-secret/);
+  const nodeIds = (flowStore.nodes as Record<string, unknown>[]).map((node) => node.id);
+  assert.deepEqual(nodeIds.sort(), ["keep", "old", diff.added[0]].sort());
+  assert.equal((flowStore.configs as Record<string, unknown>[])[0].id, "cfg-1");
+  const updatedNode = (flowStore.nodes as Record<string, unknown>[]).find((node) => node.id === "old");
+  assert.equal(updatedNode?.name, "New Name");
+
+  await assert.rejects(
+    () => client.patchFlow("tab-1", { remove: ["does-not-exist"] }),
+    (error: unknown) => error instanceof FlowValidationError && /not found/.test(error.message),
+  );
 });
 
 test("credentials are cached, known credential fields are redacted, and invalid write replies are uncertain", async (t) => {

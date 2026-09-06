@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.8
+
+### Added
+
+- `create_flow`, `update_flow`, and `deploy_flows` validate write payloads
+  before touching Node-RED, rejecting flattened `wires`, duplicate node ids,
+  dangling wire targets, and `[redacted]` value round-trips with a
+  `VALIDATION_FAILED` error instead of a silent failure.
+- Added `patch_flow`: add/update/remove specific nodes in one tab without
+  resending the whole thing. Merges against a fresh unredacted read
+  server-side and returns only an id-level diff, never full flow content.
+
 ## 0.3.7
 
 ### Added

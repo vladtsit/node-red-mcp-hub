@@ -166,6 +166,25 @@ easy for an agent to cause without noticing:
   instead; Node-RED retains stored credentials for nodes that do not supply
   them.
 
+The hub also validates `create_flow`, `update_flow`, and `deploy_flows`
+payloads before sending anything to Node-RED, rejecting the write outright
+with a `VALIDATION_FAILED` error (and no request reaching Node-RED) instead of
+letting these three failure modes happen silently: a flattened `wires` value,
+a duplicate node ID within the payload, a literal `"[redacted]"` string
+anywhere in the payload, and a wire that targets an ID that does not exist
+anywhere in the current graph or the payload itself.
+
+`patch_flow` is a safer alternative to `update_flow` for incremental changes.
+Instead of requiring the whole tab to be resent, it takes `add`/`update`/
+`remove` node lists, merges them server-side against a freshly read,
+unredacted copy of the tab, and writes the merged result back — nodes not
+mentioned are preserved automatically, and new `add` entries get an
+auto-generated ID if one is not supplied. It returns only a compact
+`{ added, updated, removed, node_count_before, node_count_after }` diff of
+node IDs, never full flow content, so secret values read internally for the
+merge are never echoed back to the calling agent. The same validation as
+above applies to the merged result before it is written.
+
 `deploy_flows` needs the `rev` returned by `get_flows` and passes it straight
 to Node-RED. A stale revision is returned as Node-RED's HTTP 409; the hub never
 forces or retries a deploy. Individual-flow operations use Node-RED's native
