@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- Fixed Home Assistant Node-RED discovery for host-networked add-ons: Docker
+  publishes no port mappings in host network mode, so discovery now falls
+  back to the container's fixed port when Supervisor reports `host_network`
+  and no mappings, instead of failing to start without an explicit `url`.
+
 ## 0.3.1
 
 - Fixed Home Assistant Node-RED discovery, which read the wrong container port

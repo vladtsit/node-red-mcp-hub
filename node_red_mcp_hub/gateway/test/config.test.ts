@@ -86,7 +86,7 @@ test("discovers a host-networked Node-RED that reports no ports and no container
     if (url.endsWith("/network/info")) {
       return new Response(JSON.stringify({ interfaces: [{ primary: true, ipv4: { address: ["192.168.3.57/24"] } }] }));
     }
-    return new Response(JSON.stringify({ name: "Node-RED", ip_address: "", host_network: true, network: { "1880/tcp": 1880 } }));
+    return new Response(JSON.stringify({ name: "Node-RED", ip_address: "", host_network: true, network: {} }));
   }, "supervisor-token");
   assert.equal(parseConfig(discovered).servers.get("home_assistant_node_red")?.baseUrl.toString(), "http://192.168.3.57:1880/");
 });

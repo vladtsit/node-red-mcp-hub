@@ -182,7 +182,9 @@ function portNumber(value: unknown): number | undefined {
 /**
  * Supervisor reports a container-port to host-port map such as
  * `{ "1880/tcp": 1880 }`. Node-RED's own port is preferred; any other single
- * mapping is accepted so a relocated Admin API still resolves.
+ * mapping is accepted so a relocated Admin API still resolves. Host-networked
+ * add-ons publish no mappings at all (Docker skips port publishing in host
+ * mode), so the container port is used verbatim as the host port instead.
  */
 function networkPorts(info: Record<string, unknown>): { internal: number; published?: number } {
   const network = record(info.network) ?? {};
@@ -191,9 +193,10 @@ function networkPorts(info: Record<string, unknown>): { internal: number; publis
     const internal = portNumber(container.split("/", 1)[0]);
     if (internal !== undefined) mappings.push({ internal, published: portNumber(host) });
   }
-  return mappings.find((mapping) => mapping.internal === NODE_RED_INTERNAL_PORT)
-    ?? mappings[0]
-    ?? { internal: NODE_RED_INTERNAL_PORT };
+  const match = mappings.find((mapping) => mapping.internal === NODE_RED_INTERNAL_PORT) ?? mappings[0];
+  if (match) return match;
+  if (info.host_network === true) return { internal: NODE_RED_INTERNAL_PORT, published: NODE_RED_INTERNAL_PORT };
+  return { internal: NODE_RED_INTERNAL_PORT };
 }
 
 /**

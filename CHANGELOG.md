@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2 - 2026-09-06
+
+### Fixed
+
+- Home Assistant Node-RED discovery still failed to start without an explicit
+  `home_assistant_node_red.url` for host-networked add-ons: Docker publishes no
+  container-to-host port mappings in host network mode, so Supervisor reports
+  an empty `network` map even though Node-RED is reachable on its fixed port.
+  Discovery now falls back to Node-RED's container port as the published port
+  when Supervisor reports `host_network: true` and no port mappings.
+
 ## 0.3.1 - 2026-09-06
 
 ### Fixed
