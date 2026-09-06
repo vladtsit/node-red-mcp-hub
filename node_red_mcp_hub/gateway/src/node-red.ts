@@ -240,8 +240,30 @@ export class NodeRedClient {
       ? (settings as Record<string, unknown>).version : undefined;
     return { ok: true, latency_ms: Math.round(performance.now() - started), ...(version ? { version } : {}) };
   }
-  createFlow(flow: unknown) { return this.request("/flow", "POST", flow, undefined, true); }
-  updateFlow(id: string, flow: unknown) { return this.request(`/flow/${flowPathSegment(id)}`, "PUT", flow, undefined, true); }
+  /**
+   * POST /flow and PUT /flow/:id only perform a targeted "nodes" reload of the
+   * affected tab. In practice new nodes it adds (e.g. a new debug node) can be
+   * created but not fully wired into the running flow's message/status
+   * routing until a "Modified Flows" deploy runs, matching what the editor's
+   * Deploy button does after any change. Follow every single-flow write with
+   * a "flows"-type redeploy of the current config so newly added nodes
+   * actually start, without restarting the whole runtime like a full deploy.
+   */
+  private async redeployModifiedFlows() {
+    const current = flowDocument(await this.getFlowsRaw());
+    if (!current.rev) return;
+    await this.request("/flows", "POST", { flows: current.flows, rev: current.rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": "flows" }, true);
+  }
+  async createFlow(flow: unknown) {
+    const result = await this.request("/flow", "POST", flow, undefined, true);
+    await this.redeployModifiedFlows();
+    return result;
+  }
+  async updateFlow(id: string, flow: unknown) {
+    const result = await this.request(`/flow/${flowPathSegment(id)}`, "PUT", flow, undefined, true);
+    await this.redeployModifiedFlows();
+    return result;
+  }
   deleteFlow(id: string) { return this.request(`/flow/${flowPathSegment(id)}`, "DELETE", undefined, undefined, true); }
   deployFlows(flows: unknown, rev: string, deploymentType: "nodes" | "flows" | "full") {
     return this.request("/flows", "POST", { flows, rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": deploymentType }, true);

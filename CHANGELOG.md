@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.4 - 2026-09-06
+
+### Fixed
+
+- `create_flow` and `update_flow` created/updated nodes that stayed visible in
+  the editor but never actually ran (no debug output, no status) until the
+  user nudged a node and clicked Deploy. Node-RED's single-flow endpoints
+  only perform a targeted reload of the affected tab and don't reliably start
+  newly added nodes' message/status routing. Both tools now automatically
+  redeploy the modified flow (equivalent to the editor's "Modified Flows"
+  deploy) immediately after the write.
+
 ## 0.3.3 - 2026-09-06
 
 ### Fixed

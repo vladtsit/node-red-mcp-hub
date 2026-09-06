@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.4
+
+- Fixed `create_flow`/`update_flow` leaving newly added nodes (e.g. a new
+  debug node) visible but not actually running: Node-RED's single-flow
+  `POST /flow`/`PUT /flow/:id` endpoints only do a targeted reload and don't
+  reliably wire newly added nodes into message/status routing until a
+  "Modified Flows" deploy runs. Both tools now automatically follow up with
+  that redeploy so new nodes work immediately, without a manual editor
+  deploy and without restarting unrelated flows.
+
 ## 0.3.3
 
 - Fixed Home Assistant Node-RED discovery failing with "could not find an

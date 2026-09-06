@@ -161,7 +161,8 @@ test("Basic-authenticated writes create a private pre-write flow backup", async 
   assert.equal(create?.annotations?.destructiveHint, false);
   const response = await client.callTool({ name: "create_flow", arguments: { server_id: "target", flow: { id: "new" } } });
   assert.equal(response.isError, undefined);
-  assert.deepEqual(authorizations, ["Basic aGE6c2VjcmV0", "Basic aGE6c2VjcmV0"]);
+  // backup GET /flows, create POST /flow, then the redeploy's GET /flows + POST /flows.
+  assert.deepEqual(authorizations, ["Basic aGE6c2VjcmV0", "Basic aGE6c2VjcmV0", "Basic aGE6c2VjcmV0", "Basic aGE6c2VjcmV0"]);
   const files = await readdir(join(backupDir, "target"));
   assert.equal(files.length, 1);
   const backup = JSON.parse(await readFile(join(backupDir, "target", files[0]), "utf8"));
@@ -190,13 +191,22 @@ test("a failed pre-write backup blocks the mutation", async (t) => {
   assert.equal(writes, 0);
 });
 
-test("native writes preserve payloads and expose Node-RED revision conflicts", async (t) => {
+test("native writes preserve payloads, redeploy the modified flow, and expose Node-RED revision conflicts", async (t) => {
   const seen: { method?: string; path?: string; body?: unknown; deployment?: string }[] = [];
   const target = await start(createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    seen.push({ method: request.method, path: request.url, body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined, deployment: request.headers["node-red-deployment-type"] as string | undefined });
-    if (request.url === "/flows") { response.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ message: "stale" })); return; }
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
+    seen.push({ method: request.method, path: request.url, body, deployment: request.headers["node-red-deployment-type"] as string | undefined });
+    if (request.url === "/flows" && request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "server-rev", flows: [] }));
+      return;
+    }
+    // Only the deliberately stale rev used below should conflict; the client's own post-write redeploy uses a freshly fetched rev.
+    if (request.url === "/flows" && (body as { rev?: string } | undefined)?.rev === "old-rev") {
+      response.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ message: "stale" }));
+      return;
+    }
     response.writeHead(204).end();
   }));
   t.after(target.close);
@@ -204,8 +214,10 @@ test("native writes preserve payloads and expose Node-RED revision conflicts", a
   const flow = { id: "tab-1", label: "Custom", custom_property: { retained: true }, credentials: { unchanged: true } };
   await client.updateFlow("tab-1", flow);
   assert.deepEqual(seen[0], { method: "PUT", path: "/flow/tab-1", body: flow, deployment: undefined });
+  assert.deepEqual(seen[1], { method: "GET", path: "/flows", body: undefined, deployment: undefined });
+  assert.deepEqual(seen[2], { method: "POST", path: "/flows", body: { flows: [], rev: "server-rev" }, deployment: "flows" });
   await assert.rejects(() => client.deployFlows([], "old-rev", "flows"), (error: unknown) => error instanceof UpstreamError && error.status === 409);
-  assert.deepEqual(seen[1], { method: "POST", path: "/flows", body: { flows: [], rev: "old-rev" }, deployment: "flows" });
+  assert.deepEqual(seen.at(-1), { method: "POST", path: "/flows", body: { flows: [], rev: "old-rev" }, deployment: "flows" });
 });
 
 test("credentials are cached, known credential fields are redacted, and invalid write replies are uncertain", async (t) => {
