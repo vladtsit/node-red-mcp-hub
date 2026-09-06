@@ -136,7 +136,18 @@ When global write access is enabled, `create_flow`, `update_flow`,
 `delete_flow`, and `deploy_flows` are available. They map directly to the
 Node-RED APIs. `update_flow` requires `flow.id` to match `flow_id`; it forwards
 the native object so custom node properties and existing credential references
-are not reconstructed by the hub.
+are not reconstructed by the hub. `create_flow` and `update_flow` also redeploy
+the modified flow immediately afterward, so newly added or changed nodes start
+running right away instead of only appearing in the editor until a manual
+deploy.
+
+The server advertises MCP `instructions` telling a connected agent to read
+current flow state before writing, use only node types confirmed installed,
+prefer scoped `update_flow` over a full `deploy_flows`, and — most importantly —
+always describe the exact change and get explicit user confirmation before
+calling `create_flow`, `update_flow`, `delete_flow`, or `deploy_flows`. This is
+guidance surfaced to the connecting agent, not a technical restriction enforced
+by the hub; `read_only` remains the actual access control.
 
 `deploy_flows` needs the `rev` returned by `get_flows` and passes it straight
 to Node-RED. A stale revision is returned as Node-RED's HTTP 409; the hub never

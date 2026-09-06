@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.5 - 2026-09-06
+
+### Added
+
+- The MCP server now advertises `instructions` guiding a connecting agent to
+  develop and modify flows following best practices (inspect current state
+  first, only use installed node types, prefer scoped updates, keep new nodes
+  clearly named and laid out) and to always confirm the exact change with the
+  user before any `create_flow`, `update_flow`, `delete_flow`, or
+  `deploy_flows` call. The same reminder was added to each write tool's
+  description.
+
 ## 0.3.4 - 2026-09-06
 
 ### Fixed

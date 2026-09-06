@@ -33,8 +33,28 @@ async function parseJson(request: IncomingMessage): Promise<unknown> {
   catch { throw new Error("invalid_json"); }
 }
 
+const AGENT_INSTRUCTIONS = `Before any create_flow, update_flow, or delete_flow call, describe the exact
+change (which nodes/tabs are added, modified, or removed) and get explicit
+confirmation from the user first. Never delete or overwrite a flow the user
+has not specifically agreed to change.
+
+When developing or modifying flows:
+- Inspect current state first with list_flows/get_flow/search_nodes before
+  writing; avoid get_flows for a full export unless truly needed, since it can
+  be large and may contain sensitive Function code.
+- Only use node "type"s confirmed available via get_installed_modules or
+  search_nodes; never invent a type that may not be installed.
+- Prefer update_flow scoped to the one affected tab over deploy_flows (a full
+  graph deploy) unless the change genuinely spans multiple tabs.
+- Give new nodes a descriptive "name" and lay them out left-to-right
+  (increasing x) with clear y spacing so the flow stays readable.
+- When adding a node meant only for manual testing, use an inject node with
+  "once": false and no "repeat"/"crontab" so it never fires on its own.
+- create_flow/update_flow already redeploy the modified flow automatically;
+  no extra deploy step is needed after them.`;
+
 function createMcpServer(config: GatewayConfig, runtime: GatewayRuntime): McpServer {
-  const mcp = new McpServer({ name: "node-red-mcp-hub", version: APP_VERSION });
+  const mcp = new McpServer({ name: "node-red-mcp-hub", version: APP_VERSION }, { instructions: AGENT_INSTRUCTIONS });
   registerTools(mcp, config, runtime);
   return mcp;
 }

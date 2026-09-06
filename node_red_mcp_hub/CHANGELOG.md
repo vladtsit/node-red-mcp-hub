@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.5
+
+### Added
+
+- MCP server `instructions` and write-tool descriptions now tell a connecting
+  agent to read current flow state first, use only installed node types,
+  prefer scoped `update_flow` over a full `deploy_flows`, and always confirm
+  the exact change with the user before calling `create_flow`, `update_flow`,
+  `delete_flow`, or `deploy_flows`.
+
 ## 0.3.4
 
 - Fixed `create_flow`/`update_flow` leaving newly added nodes (e.g. a new
