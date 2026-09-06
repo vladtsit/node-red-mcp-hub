@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.9 - 2026-09-06
+
+### Added
+
+- Added `create_subflow`, a dedicated tool for creating an empty native
+  Node-RED subflow container (with `in`/`out` port arrays and optional `env`
+  vars) after a configured pre-write backup. Internal nodes and wiring are
+  then added with `patch_flow`/`update_flow` scoped to the returned subflow
+  id.
+- Exposed flows as MCP resources under `flow://{server_id}/{flow_id}`, listed
+  from every configured target, redacted the same way as `get_flow`.
+- Added two MCP prompt templates, `add_inject_debug_pair` and
+  `diagnose_silent_failure`, covering common flow-authoring and
+  troubleshooting workflows.
+- Backups can now also be pruned by age via the new `backup_max_age_days`
+  option, in addition to the existing count-based `backup_retain` limit.
+- `/healthz` now accepts `?targets=<mcp_path_secret>` to return per-target
+  reachability and Node-RED version, alongside the existing fast
+  unauthenticated `{"status":"ok"}` liveness response.
+
 ## 0.3.8 - 2026-09-06
 
 ### Added

@@ -29,6 +29,7 @@ export interface GatewayConfig {
   redactSecrets: boolean;
   backupBeforeWrite: boolean;
   backupRetain: number;
+  backupMaxAgeDays: number;
   backupDir: string;
   disabledTools: Set<string>;
   servers: Map<string, TargetConfig>;
@@ -42,6 +43,7 @@ type RawOptions = {
   redact_secrets?: unknown;
   backup_before_write?: unknown;
   backup_retain?: unknown;
+  backup_max_age_days?: unknown;
   disabled_tools?: unknown;
 };
 
@@ -325,6 +327,7 @@ export function parseConfig(input: RawOptions): GatewayConfig {
     redactSecrets: boolOption(input.redact_secrets, "redact_secrets", true),
     backupBeforeWrite: boolOption(input.backup_before_write, "backup_before_write", true),
     backupRetain: intOption(input.backup_retain, "backup_retain", 20, 1, 1000),
+    backupMaxAgeDays: intOption(input.backup_max_age_days, "backup_max_age_days", 0, 0, 3650),
     backupDir: process.env.BACKUP_DIR ?? DEFAULT_BACKUP_DIR,
     disabledTools: toolSet(input.disabled_tools, "disabled_tools"),
     servers,

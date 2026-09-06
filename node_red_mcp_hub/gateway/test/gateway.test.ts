@@ -3,14 +3,16 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { connect } from "node:net";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { parseConfig } from "../src/config.js";
+import type { TargetConfig } from "../src/config.js";
 import { createGateway } from "../src/index.js";
 import { NodeRedClient, UpstreamError, FlowValidationError } from "../src/node-red.js";
+import { BackupManager } from "../src/backup.js";
 
 async function start(server: ReturnType<typeof createServer>) {
   server.listen(0, "127.0.0.1");
@@ -64,6 +66,11 @@ test("actual MCP client initializes, discovers, and routes simultaneous target r
       response.end(JSON.stringify({ version: `4.0.${label === "one" ? 1 : 2}` }));
       return;
     }
+    if (request.url === `/admin/flow/${label}-tab`) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ id: `${label}-tab`, label: `Flow ${label}`, nodes: [{ id: label, type: "inject", name: `Hello ${label}`, z: `${label}-tab` }] }));
+      return;
+    }
     response.writeHead(404).end();
   }))));
   t.after(async () => { await Promise.all(targets.map((target) => target.close())); });
@@ -91,6 +98,16 @@ test("actual MCP client initializes, discovers, and routes simultaneous target r
   const search = await client.callTool({ name: "search_nodes", arguments: { server_id: "one", query: "hello" } });
   assert.match((search.content as { text: string }[])[0].text, /"flow_label":"Flow one"/);
   assert.doesNotMatch((search.content as { text: string }[])[0].text, /not returned by summaries/);
+
+  const resources = await client.listResources();
+  assert.ok(resources.resources.some((resource) => resource.uri === "flow://one/one-tab"));
+  const read = await client.readResource({ uri: "flow://one/one-tab" });
+  assert.match((read.contents[0] as { text: string }).text, /Hello one/);
+
+  const prompts = await client.listPrompts();
+  assert.deepEqual(prompts.prompts.map((prompt) => prompt.name).sort(), ["add_inject_debug_pair", "diagnose_silent_failure"]);
+  const prompt = await client.getPrompt({ name: "diagnose_silent_failure", arguments: { server_id: "one", flow_id: "one-tab" } });
+  assert.match((prompt.messages[0].content as { text: string }).text, /wires/);
 });
 
 test("global tool policy hides tools and target policy blocks calls", async (t) => {
@@ -396,4 +413,75 @@ test("gateway permits at most twenty simultaneous upstream calls", async (t) => 
   const rejected = responses.filter((response) => response.status === "rejected").length;
   const busyResults = responses.filter((response) => response.status === "fulfilled" && response.value.isError && (response.value.content as { text: string }[])[0].text.includes("Gateway is busy")).length;
   assert.equal(rejected + busyResults, 10);
+});
+
+test("BackupManager prunes stale backups by age in addition to count", async (t) => {
+  const backupDir = await mkdtemp(join(tmpdir(), "node-red-mcp-backup-age-"));
+  t.after(() => rm(backupDir, { recursive: true, force: true }));
+  const target: TargetConfig = { id: "target", name: "Target", baseUrl: new URL("http://127.0.0.1:1/admin"), authMode: "none", readOnly: false, disabledTools: new Set() };
+  const client = { getFlowsForBackup: async () => ({ rev: "r1", flows: [] }) } as unknown as NodeRedClient;
+  const manager = new BackupManager(backupDir, 10, 1);
+  await manager.capture(target, client, "seed");
+  const targetDir = join(backupDir, "target");
+  const [seeded] = await readdir(targetDir);
+  await utimes(join(targetDir, seeded), new Date(Date.now() - 2 * 24 * 60 * 60 * 1000), new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
+  await manager.capture(target, client, "fresh");
+  const files = await readdir(targetDir);
+  assert.equal(files.length, 1);
+  assert.doesNotMatch(files[0], /seed/);
+  assert.match(files[0], /fresh/);
+});
+
+test("create_subflow posts a native subflow container with in/out port arrays", async (t) => {
+  const seen: { path?: string; body?: unknown }[] = [];
+  const target = await start(createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
+    seen.push({ path: request.url, body });
+    if (request.url === "/flows") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: [] })); return; }
+    if (request.url === "/flow") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "new-subflow" })); return; }
+    response.writeHead(404).end();
+  }));
+  t.after(target.close);
+  const secret = "e".repeat(64);
+  const gateway = await start(createGateway(parseConfig({
+    mcp_path_secret: secret, read_only: false,
+    servers: [{ id: "target", name: "Target", url: target.url, auth_mode: "none", read_only: false }],
+  })));
+  t.after(gateway.close);
+  const client = await mcp(gateway.url, secret);
+  t.after(() => client.close());
+  const response = await client.callTool({ name: "create_subflow", arguments: { server_id: "target", name: "My Subflow", inputs: 1, outputs: 2 } });
+  assert.equal(response.isError, undefined);
+  const posted = seen.find((entry) => entry.path === "/flow")?.body as Record<string, unknown>;
+  assert.equal(posted.type, "subflow");
+  assert.equal(posted.name, "My Subflow");
+  assert.equal((posted.in as unknown[]).length, 1);
+  assert.equal((posted.out as unknown[]).length, 2);
+  assert.ok((posted.out as { id: string }[]).every((port) => typeof port.id === "string" && port.id.length > 0));
+});
+
+test("/healthz exposes per-target status only when the path secret is supplied", async (t) => {
+  const target = await start(createServer((request, response) => {
+    if (request.url === "/settings") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ version: "4.0.1" })); return; }
+    response.writeHead(404).end();
+  }));
+  t.after(target.close);
+  const secret = "c".repeat(64);
+  const gateway = await start(createGateway(parseConfig({
+    mcp_path_secret: secret, read_only: true,
+    servers: [{ id: "target", name: "Target", url: target.url, auth_mode: "none", read_only: false }],
+  })));
+  t.after(gateway.close);
+  const plain = await fetch(`${gateway.url}/healthz`);
+  assert.equal(plain.status, 200);
+  assert.deepEqual(await plain.json(), { status: "ok" });
+  const withTargets = await fetch(`${gateway.url}/healthz?targets=${secret}`);
+  assert.equal(withTargets.status, 200);
+  const body = await withTargets.json() as { status: string; targets: { id: string; ok: boolean }[] };
+  assert.equal(body.status, "ok");
+  assert.equal(body.targets.length, 1);
+  assert.equal(body.targets[0].id, "target");
+  assert.equal(body.targets[0].ok, true);
 });

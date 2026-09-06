@@ -1,5 +1,6 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { BackupError, BackupManager } from "./backup.js";
 import { MAX_IN_FLIGHT, type GatewayConfig } from "./config.js";
@@ -32,7 +33,7 @@ export class GatewayRuntime {
 
   constructor(readonly config: GatewayConfig) {
     this.clients = new Map([...config.servers.entries()].map(([id, target]) => [id, new NodeRedClient(target)]));
-    this.backups = new BackupManager(config.backupDir, config.backupRetain);
+    this.backups = new BackupManager(config.backupDir, config.backupRetain, config.backupMaxAgeDays);
   }
 
   async run<T>(action: () => Promise<T> | T): Promise<T> {
@@ -105,4 +106,86 @@ export function registerTools(server: McpServer, config: GatewayConfig, runtime:
   register("patch_flow", { title: "Patch Flow", description: "Add, update, or remove specific nodes within one flow tab, without needing to resend the whole tab. Existing nodes not mentioned are preserved automatically, and stored secrets are never round-tripped through you. Confirm the exact change with the user before calling this. Not for adding groups or subflow definitions; use update_flow for those.", inputSchema: { server_id: serverId, flow_id: flowId, add: z.array(z.record(z.unknown())).max(50).optional(), update: z.array(z.record(z.unknown())).max(50).optional(), remove: z.array(z.string().min(1)).max(200).optional() }, annotations: writeAnnotations }, ({ server_id, flow_id, add, update, remove }) => call("patch_flow", server_id, (client) => client.patchFlow(flow_id, { add, update, remove }), true));
   register("delete_flow", { title: "Delete Flow", description: "Immediately delete one native Node-RED flow after taking a configured pre-write backup. Confirm with the user, naming the exact flow, before calling this; deletions are destructive.", inputSchema: { server_id: serverId, flow_id: flowId }, annotations: writeAnnotations }, ({ server_id, flow_id }) => call("delete_flow", server_id, (client) => client.deleteFlow(flow_id), true));
   register("deploy_flows", { title: "Deploy Full Flow Graph", description: "Immediately deploy a full Node-RED graph with revision protection after taking a configured pre-write backup. Confirm the exact change with the user before calling this. Each node's wires must be an array of arrays (one per output port, e.g. [[\"targetId\"]]); a flattened [\"targetId\"] fails silently.", inputSchema: { server_id: serverId, flows: z.array(z.record(z.unknown())), rev: z.string().min(1), deployment_type: deploymentType }, annotations: writeAnnotations }, ({ server_id, flows, rev, deployment_type }) => call("deploy_flows", server_id, (client) => client.deployFlows(flows, rev, deployment_type), true));
+  register("create_subflow", { title: "Create Subflow", description: "Immediately create an empty native Node-RED subflow container (not its internal nodes) after taking a configured pre-write backup. Confirm with the user before calling this. Add internal nodes afterward with patch_flow/update_flow scoped to the returned subflow id, then update_flow again to wire the in/out ports to those nodes.", inputSchema: { server_id: serverId, name: z.string().min(1).max(256), category: z.string().min(1).max(64).optional(), info: z.string().max(10_000).optional(), inputs: z.number().int().min(0).max(10).default(0), outputs: z.number().int().min(0).max(10).default(1), env: z.array(z.object({ name: z.string().min(1), type: z.string().min(1), value: z.string() })).max(50).optional() }, annotations: createAnnotations }, ({ server_id, name, category, info, inputs, outputs, env }) => {
+    const id = randomBytes(8).toString("hex");
+    const flow = {
+      id, type: "subflow", name, category: category ?? "subflows", info: info ?? "",
+      in: Array.from({ length: inputs }, (_, index) => ({ x: 40, y: 40 + index * 60, wires: [] })),
+      out: Array.from({ length: outputs }, (_, index) => ({ x: 300, y: 40 + index * 60, wires: [], id: randomBytes(8).toString("hex") })),
+      env: env ?? [],
+    };
+    return call("create_subflow", server_id, (client) => client.createFlow(flow), true);
+  });
 }
+
+export function registerResourcesAndPrompts(server: McpServer, config: GatewayConfig, runtime: GatewayRuntime): void {
+  if (config.disabledTools.has("get_flow")) return;
+
+  server.registerResource(
+    "flow",
+    new ResourceTemplate("flow://{server_id}/{flow_id}", {
+      list: async () => {
+        const perServer = await Promise.all([...config.servers.entries()].map(async ([id, target]) => {
+          try {
+            const summary = await runtime.run(() => runtime.clients.get(id)!.listFlows()) as { flows: { id: string; label: string }[] };
+            return summary.flows.map((flow) => ({ uri: `flow://${id}/${flow.id}`, name: `${target.name}: ${flow.label || flow.id}`, mimeType: "application/json" }));
+          } catch { return []; }
+        }));
+        return { resources: perServer.flat() };
+      },
+    }),
+    { title: "Node-RED Flow", description: "A single Node-RED tab or subflow, redacted the same way as get_flow.", mimeType: "application/json" },
+    async (uri, variables) => {
+      const serverIdValue = String(variables.server_id);
+      const flowIdValue = String(variables.flow_id);
+      const client = runtime.clients.get(serverIdValue);
+      if (!client) throw new Error(`Unknown server_id "${serverIdValue}"`);
+      const data = await runtime.run(() => client.getFlow(flowIdValue, config.redactSecrets));
+      return { contents: [{ uri: uri.toString(), mimeType: "application/json", text: JSON.stringify(data) }] };
+    },
+  );
+
+  server.registerPrompt(
+    "add_inject_debug_pair",
+    {
+      title: "Add a manual test inject/debug pair",
+      description: "Guides safely adding a manual-trigger inject node wired to a debug node for testing a flow.",
+      argsSchema: { server_id: z.string(), flow_id: z.string() },
+    },
+    ({ server_id, flow_id }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Add a manual test inject/debug pair to flow "${flow_id}" on server "${server_id}".
+
+Use patch_flow with two "add" entries: an inject node ("once": false, no "repeat"/"crontab" so it never fires on its own) and a debug node ("tostatus": true), both with "z" set to "${flow_id}". Wire the inject node to the debug node using "wires": [["<debugNodeId>"]] — this MUST be an array of arrays; a flattened ["<debugNodeId>"] fails silently. Give both nodes their own random 16-character lowercase hex "id" and a descriptive "name". Confirm the exact change with the user before calling patch_flow, then re-read with get_flow to confirm the wiring landed as intended.`,
+        },
+      }],
+    }),
+  );
+
+  server.registerPrompt(
+    "diagnose_silent_failure",
+    {
+      title: "Diagnose a flow that silently does nothing",
+      description: "A checklist for diagnosing a Node-RED flow that appears to run but produces no visible effect.",
+      argsSchema: { server_id: z.string(), flow_id: z.string() },
+    },
+    ({ server_id, flow_id }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Flow "${flow_id}" on server "${server_id}" appears to run without any visible effect. Use get_flow to read its current definition, then check, in order:
+1. Every node's "wires" is an array of arrays (e.g. [["targetId"]]), not a flattened array of id strings — the single most common silent failure.
+2. Every wire target id actually exists in this flow (a typo'd or stale id silently drops the message).
+3. Every node's "z" equals "${flow_id}" and no node is unexpectedly "disabled"/"d": true.
+4. Whether a catch node is present to surface runtime errors; if not, add one scoped to the relevant nodes so future failures are not silent either.
+Report back which of these you found before proposing a fix, and confirm the exact change with the user before writing it.`,
+        },
+      }],
+    }),
+  );
+}
+

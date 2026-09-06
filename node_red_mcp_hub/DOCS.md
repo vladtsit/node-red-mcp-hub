@@ -39,6 +39,7 @@ read_only: true
 redact_secrets: true
 backup_before_write: true
 backup_retain: 20
+backup_max_age_days: 0
 disabled_tools: ''
 home_assistant_node_red:
   enabled: true
@@ -116,8 +117,11 @@ http://HOME_ASSISTANT_LAN_ADDRESS:51844/private_YOUR_64_HEX_SECRET
 Do not add a bearer token. The private URL is the credential: store it as a
 secret, never expose the endpoint to the public internet, and rotate it by
 changing `mcp_path_secret` and restarting the add-on. Browser requests are
-rejected and CORS is intentionally disabled. `/healthz` is the only other
-route; it contains no target health or configuration data.
+rejected and CORS is intentionally disabled. `/healthz` returns a fast,
+unauthenticated `{"status":"ok"}` by default. Adding `?targets=<mcp_path_secret>`
+returns per-target reachability and Node-RED version instead — the same
+secret used in the private MCP URL is required, so this diagnostic detail is
+not exposed to unauthenticated requests.
 
 ## Tools and write behavior
 
@@ -190,10 +194,33 @@ to Node-RED. A stale revision is returned as Node-RED's HTTP 409; the hub never
 forces or retries a deploy. Individual-flow operations use Node-RED's native
 concurrency behavior and have no hub-side revision control.
 
+`create_subflow` creates an empty native subflow container (with `in`/`out`
+port arrays sized by the `inputs`/`outputs` arguments, and optional `env`
+vars) after a configured pre-write backup. It does not create the subflow's
+internal nodes; add those afterward with `patch_flow` or `update_flow` scoped
+to the returned subflow ID, then wire the `in`/`out` ports to those nodes with
+a follow-up `update_flow`.
+
+## MCP resources and prompts
+
+Each configured flow tab and subflow is also exposed as an MCP resource under
+`flow://{server_id}/{flow_id}`, listed across every target and read the same
+way (and with the same redaction) as `get_flow`. Listing resources requires
+`get_flow` to not be in `disabled_tools`.
+
+Two prompt templates are available for common flow-authoring tasks:
+`add_inject_debug_pair` (guides adding a manual-trigger inject node wired to a
+debug node for testing) and `diagnose_silent_failure` (a checklist for a flow
+that runs without any visible effect: wires shape, dangling wire targets, `z`
+consistency, and catch-node coverage).
+
 Writes are immediate. Before each write, `backup_before_write: true` stores an
 atomic, unredacted v2 flow snapshot in `/data/backups/<server-id>/`; it blocks
 the write if the backup fails. At most `backup_retain` snapshots are kept per
-server. These files are private but sensitive and are intended for deliberate
+server. Set `backup_max_age_days` above `0` to additionally prune snapshots
+older than that many days, even if fewer than `backup_retain` remain; the
+default `0` disables age-based pruning and only count-based retention applies.
+These files are private but sensitive and are intended for deliberate
 manual recovery, not automatic rollback.
 
 If the network fails or a write times out after it may have reached Node-RED,
@@ -206,7 +233,9 @@ that target. Unknown names are rejected and `list_servers` is always present.
 
 ## Operational notes
 
-- Target failures never make `/healthz` fail; each target is isolated.
+- Target failures never make the default `/healthz` fail; each target is
+  isolated, and per-target detail is only returned when `?targets=` is passed
+  the correct path secret.
 - The gateway runs as the app's root user inside its custom AppArmor profile;
   Home Assistant's restricted app environment does not permit the ownership
   changes needed to drop to a separate Unix user.

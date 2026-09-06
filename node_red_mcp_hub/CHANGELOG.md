@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.9
+
+### Added
+
+- Added `create_subflow` for creating an empty native subflow container
+  (in/out ports, optional env vars) after a pre-write backup.
+- Exposed flows as MCP resources (`flow://{server_id}/{flow_id}`) and added
+  two prompt templates: `add_inject_debug_pair` and
+  `diagnose_silent_failure`.
+- Backups can now be pruned by age via `backup_max_age_days`, in addition to
+  the existing count-based retention.
+- `/healthz?targets=<mcp_path_secret>` returns per-target reachability and
+  version; the default unauthenticated `/healthz` is unchanged.
+
 ## 0.3.8
 
 ### Added

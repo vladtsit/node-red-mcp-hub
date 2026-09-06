@@ -17,6 +17,9 @@ configuration:
   backup_retain:
     name: Backups retained per server
     description: Maximum number of automatic pre-write snapshots retained for each Node-RED server.
+  backup_max_age_days:
+    name: Backup max age (days)
+    description: Additionally prunes pre-write snapshots older than this many days. 0 disables age-based pruning.
   disabled_tools:
     name: Globally disabled tools
     description: Optional comma-separated MCP tool names to omit from discovery.

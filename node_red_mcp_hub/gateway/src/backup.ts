@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TargetConfig } from "./config.js";
 import type { NodeRedClient } from "./node-red.js";
@@ -7,7 +7,7 @@ import type { NodeRedClient } from "./node-red.js";
 export class BackupError extends Error {}
 
 export class BackupManager {
-  constructor(private readonly directory: string, private readonly retain: number) {}
+  constructor(private readonly directory: string, private readonly retain: number, private readonly maxAgeDays = 0) {}
 
   async capture(target: TargetConfig, client: NodeRedClient, tool: string): Promise<void> {
     const targetDir = join(this.directory, target.id);
@@ -21,7 +21,17 @@ export class BackupManager {
       await writeFile(temporaryPath, JSON.stringify({ created_at: new Date().toISOString(), server_id: target.id, tool, flows }), { mode: 0o600, flag: "wx" });
       await rename(temporaryPath, finalPath);
       const files = (await readdir(targetDir)).filter((item) => item.endsWith(".json")).sort().reverse();
-      await Promise.all(files.slice(this.retain).map(async (item) => {
+      const stale = files.slice(this.retain);
+      if (this.maxAgeDays > 0) {
+        const cutoff = Date.now() - this.maxAgeDays * 24 * 60 * 60 * 1000;
+        for (const item of files.slice(0, this.retain)) {
+          try { if ((await stat(join(targetDir, item))).mtimeMs < cutoff) stale.push(item); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+        }
+      }
+      await Promise.all(stale.map(async (item) => {
         try { await unlink(join(targetDir, item)); }
         catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -34,3 +44,4 @@ export class BackupManager {
     }
   }
 }
+

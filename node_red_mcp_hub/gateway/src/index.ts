@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { MAX_BODY_BYTES, MAX_IN_FLIGHT, PORT, loadConfig, type GatewayConfig } from "./config.js";
-import { GatewayRuntime, registerTools } from "./tools.js";
+import { GatewayRuntime, registerResourcesAndPrompts, registerTools } from "./tools.js";
 import { APP_VERSION } from "./version.js";
 
 function json(response: ServerResponse, status: number, body: unknown): void {
@@ -114,11 +114,20 @@ After writing
 - If a write fails or times out, do NOT blindly retry: it may already have
   been applied. Read the flow first to establish the actual state.
 - deploy_flows needs the "rev" from get_flows; a stale rev returns HTTP 409.
-  Re-read and re-apply rather than trying to force it.`;
+  Re-read and re-apply rather than trying to force it.
+
+Subflows and other MCP primitives
+- create_subflow creates only an empty subflow container (in/out ports, no
+  internal nodes). Add internal nodes with patch_flow/update_flow scoped to
+  the returned subflow id, then update_flow again to wire the in/out ports.
+- Flows are also exposed as MCP resources (flow://{server_id}/{flow_id}), and
+  add_inject_debug_pair/diagnose_silent_failure prompt templates are
+  available for common authoring and troubleshooting tasks.`;
 
 function createMcpServer(config: GatewayConfig, runtime: GatewayRuntime): McpServer {
   const mcp = new McpServer({ name: "node-red-mcp-hub", version: APP_VERSION }, { instructions: AGENT_INSTRUCTIONS });
   registerTools(mcp, config, runtime);
+  registerResourcesAndPrompts(mcp, config, runtime);
   return mcp;
 }
 
@@ -131,7 +140,16 @@ export function createGateway(config: GatewayConfig) {
     catch { return json(response, 400, { error: "invalid_request_target" }); }
     if (url.pathname === "/healthz") {
       if (request.method !== "GET") return json(response, 405, { error: "method_not_allowed" });
-      return json(response, 200, { status: "ok" });
+      // Per-target diagnostics require the same secret as the MCP path so /healthz itself stays unauthenticated and cheap.
+      if (url.searchParams.get("targets") !== config.pathSecret) return json(response, 200, { status: "ok" });
+      const targets = await Promise.all([...config.servers.entries()].map(async ([id, target]) => {
+        try { return { id, name: target.name, ...(await runtime.clients.get(id)!.checkStatus()) }; }
+        catch (caught) {
+          const detail = caught instanceof Error ? caught.message : "unknown error";
+          return { id, name: target.name, ok: false, error: detail };
+        }
+      }));
+      return json(response, 200, { status: "ok", targets });
     }
     if (url.search) return json(response, 404, { error: "not_found" });
     if (!secretPathMatches(url.pathname, config.pathSecret)) return json(response, 404, { error: "not_found" });
