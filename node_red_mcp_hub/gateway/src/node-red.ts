@@ -95,6 +95,19 @@ function flowPathSegment(id: string): string {
   return encodeURIComponent(id);
 }
 
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, index) => deepEqual(item, b[index]));
+  }
+  if (!isPlainObject(a) || !isPlainObject(b)) return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((key) => deepEqual(a[key], b[key]));
+}
+
 export class NodeRedClient {
   #token?: CachedToken;
   #tokenRefresh?: Promise<string>;
@@ -162,7 +175,7 @@ export class NodeRedClient {
   }
 
   private async raw(path: string, options: {
-    method: string; body?: string; headers?: Record<string, string>; skipAuth?: boolean; write?: boolean;
+    method: string; body?: string; headers?: Record<string, string>; skipAuth?: boolean; write?: boolean; expectJson?: boolean;
   }, allowReadAuthRefresh = true): Promise<{ json: unknown; empty: boolean }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -189,6 +202,8 @@ export class NodeRedClient {
       }
       const body = await this.readBody(response);
       if (!body) return { json: undefined, empty: true };
+      // Some admin routes (e.g. POST /inject/:id) reply res.sendStatus(200) with a plain-text "OK" body, not JSON.
+      if (options.expectJson === false) return { json: undefined, empty: true };
       try { return { json: JSON.parse(body), empty: false }; }
       catch { throw new UpstreamError("Node-RED returned an invalid JSON response", undefined, false, "UPSTREAM_INVALID_RESPONSE"); }
     } catch (error) {
@@ -206,9 +221,9 @@ export class NodeRedClient {
     } finally { clearTimeout(timer); }
   }
 
-  private async request(path: string, method = "GET", body?: unknown, extraHeaders?: Record<string, string>, write = false): Promise<unknown> {
+  private async request(path: string, method = "GET", body?: unknown, extraHeaders?: Record<string, string>, write = false, expectJson = true): Promise<unknown> {
     const result = await this.raw(path, {
-      method, write, headers: body === undefined ? extraHeaders : { "content-type": "application/json", ...extraHeaders },
+      method, write, expectJson, headers: body === undefined ? extraHeaders : { "content-type": "application/json", ...extraHeaders },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     return result.empty ? { ok: true } : result.json;
@@ -344,6 +359,25 @@ export class NodeRedClient {
     const result = await this.request("/flow", "POST", flow, undefined, true);
     return this.completeWrite(result);
   }
+  /**
+   * POST /flow (addFlow) always wraps its payload as a new "tab" with a
+   * server-generated id and rejects any embedded "tab"/"subflow" node, so it
+   * can never create a subflow definition. Subflow definitions instead live
+   * as top-level entries in the full flows array, so append it there and
+   * deploy the whole document like a "flows"-type deploy.
+   */
+  async createSubflow(subflow: Record<string, unknown>) {
+    const leaks = findRedactedLeaks(subflow).filter((issue) => issue.level === "error");
+    if (leaks.length) throw new FlowValidationError(leaks.map((issue) => issue.message));
+    const document = flowDocument(await this.getFlowsRaw(true));
+    if (document.flows.some((node) => node.id === subflow.id)) {
+      throw new FlowValidationError([`Cannot add subflow "${subflow.id}": id already exists.`]);
+    }
+    const flows = [...document.flows, subflow];
+    await this.request("/flows", "POST", { flows, rev: document.rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": "flows" }, true);
+    this.invalidateFlowsCache();
+    return { id: subflow.id };
+  }
   async updateFlow(id: string, flow: unknown, expectedRev?: string) {
     await this.validateTabWrite(flow, id);
     if (expectedRev !== undefined) await this.assertExpectedRev(expectedRev);
@@ -435,12 +469,15 @@ export class NodeRedClient {
 
     if (input.flow !== undefined) {
       const payloadNodes = this.collectNodesForTabPayload(input.flow);
-      const payloadIds = new Set(payloadNodes.map((node) => String(node.id)));
-      const added = [...payloadIds].filter((nodeId) => !currentIds.has(nodeId));
-      const removed = [...currentIds].filter((nodeId) => !payloadIds.has(nodeId));
-      const kept = [...payloadIds].filter((nodeId) => currentIds.has(nodeId));
+      const payloadById = new Map(payloadNodes.map((node) => [String(node.id), node]));
+      const currentById = new Map([...currentNodes, ...currentConfigs].map((node) => [String(node.id), node]));
+      const added = [...payloadById.keys()].filter((nodeId) => !currentIds.has(nodeId));
+      const removed = [...currentIds].filter((nodeId) => !payloadById.has(nodeId));
+      const overlapping = [...payloadById.keys()].filter((nodeId) => currentIds.has(nodeId));
+      const updated = overlapping.filter((nodeId) => !deepEqual(currentById.get(nodeId), payloadById.get(nodeId)));
+      const kept = overlapping.filter((nodeId) => deepEqual(currentById.get(nodeId), payloadById.get(nodeId)));
       const issues = [...findRedactedLeaks(input.flow), ...validateNodes(payloadNodes, { tabId: id })].map((issue) => issue.message);
-      return { mode: "flow" as const, added, kept, removed, would_delete: removed.length > 0, issues, node_count_before: currentIds.size, node_count_after: payloadIds.size };
+      return { mode: "flow" as const, added, updated, kept, removed, would_delete: removed.length > 0, issues, node_count_before: currentIds.size, node_count_after: payloadById.size };
     }
 
     const patch = input.patch ?? {};
@@ -472,7 +509,7 @@ export class NodeRedClient {
    */
   triggerInject(id: string, overrideProps?: { p: string; v: string; vt: string }[]) {
     const body = overrideProps?.length ? { __user_inject_props__: overrideProps } : undefined;
-    return this.request(`/inject/${flowPathSegment(id)}`, "POST", body);
+    return this.request(`/inject/${flowPathSegment(id)}`, "POST", body, undefined, false, false);
   }
   /** GET /context/:scope[/:id][/key]; scope "global" has no id, "flow"/"node" require one. */
   async getContext(scope: "global" | "flow" | "node", id?: string, key?: string, store?: string, keysOnly?: boolean) {

@@ -438,15 +438,17 @@ test("BackupManager prunes stale backups by age in addition to count", async (t)
   assert.match(files[0], /fresh/);
 });
 
-test("create_subflow posts a native subflow container with in/out port arrays", async (t) => {
-  const seen: { path?: string; body?: unknown }[] = [];
+test("create_subflow appends a subflow definition to the full flows document and deploys it", async (t) => {
+  const seen: { method?: string; path?: string; body?: unknown }[] = [];
+  const existing = [{ id: "tab-1", type: "tab", label: "Flow 1" }];
   const target = await start(createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
-    seen.push({ path: request.url, body });
-    if (request.url === "/flows") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: [] })); return; }
-    if (request.url === "/flow") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ id: "new-subflow" })); return; }
+    seen.push({ method: request.method, path: request.url, body });
+    if (request.url === "/nodes") { response.writeHead(200, { "content-type": "application/json" }).end("[]"); return; }
+    if (request.url === "/flows" && request.method === "GET") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: existing })); return; }
+    if (request.url === "/flows" && request.method === "POST") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r2" })); return; }
     response.writeHead(404).end();
   }));
   t.after(target.close);
@@ -460,12 +462,19 @@ test("create_subflow posts a native subflow container with in/out port arrays", 
   t.after(() => client.close());
   const response = await client.callTool({ name: "create_subflow", arguments: { server_id: "target", name: "My Subflow", inputs: 1, outputs: 2 } });
   assert.equal(response.isError, undefined);
-  const posted = seen.find((entry) => entry.path === "/flow")?.body as Record<string, unknown>;
-  assert.equal(posted.type, "subflow");
-  assert.equal(posted.name, "My Subflow");
-  assert.equal((posted.in as unknown[]).length, 1);
-  assert.equal((posted.out as unknown[]).length, 2);
-  assert.ok((posted.out as { id: string }[]).every((port) => typeof port.id === "string" && port.id.length > 0));
+  // POST /flow (single-tab create) always wraps payloads as type "tab" and rejects nested "tab"/"subflow" nodes,
+  // so a subflow definition must instead be appended to the full flows array and deployed via POST /flows.
+  const deployCall = seen.find((entry) => entry.method === "POST" && entry.path === "/flows");
+  assert.ok(deployCall, "expected a POST /flows deploy call");
+  const posted = deployCall!.body as { flows: Record<string, unknown>[]; rev: string };
+  assert.equal(posted.rev, "r1");
+  assert.deepEqual(posted.flows[0], existing[0]);
+  const subflow = posted.flows[1];
+  assert.equal(subflow.type, "subflow");
+  assert.equal(subflow.name, "My Subflow");
+  assert.equal((subflow.in as unknown[]).length, 1);
+  assert.equal((subflow.out as unknown[]).length, 2);
+  assert.ok((subflow.out as { id: string }[]).every((port) => typeof port.id === "string" && port.id.length > 0));
 });
 
 test("/healthz exposes per-target status only when the path secret is supplied", async (t) => {
@@ -499,7 +508,8 @@ test("trigger_inject fires an inject node with an optional property override", a
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
     seen.push({ path: request.url, body });
-    response.writeHead(200, { "content-type": "application/json" }).end("{}");
+    // Real Node-RED replies via res.sendStatus(200): a plain-text "OK" body, not JSON.
+    response.writeHead(200, { "content-type": "text/plain" }).end("OK");
   }));
   t.after(target.close);
   const secret = "1".repeat(64);
@@ -601,10 +611,12 @@ test("preview_flow_change diffs a would-be update without writing", async (t) =>
   const client = await mcp(gateway.url, secret);
   t.after(() => client.close());
 
-  const flowPreview = await client.callTool({ name: "preview_flow_change", arguments: { server_id: "target", flow_id: "tab-1", flow: { id: "tab-1", nodes: [{ id: "keep", type: "debug", z: "tab-1" }, { id: "added", type: "debug", z: "tab-1" }] } } });
+  const flowPreview = await client.callTool({ name: "preview_flow_change", arguments: { server_id: "target", flow_id: "tab-1", flow: { id: "tab-1", nodes: [{ id: "keep", type: "debug", z: "tab-1", name: "renamed" }, { id: "added", type: "debug", z: "tab-1" }] } } });
   assert.equal(flowPreview.isError, undefined);
-  const flowDiff = JSON.parse((flowPreview.content as { text: string }[])[0].text) as { added: string[]; removed: string[]; would_delete: boolean };
+  const flowDiff = JSON.parse((flowPreview.content as { text: string }[])[0].text) as { added: string[]; updated: string[]; kept: string[]; removed: string[]; would_delete: boolean };
   assert.deepEqual(flowDiff.added, ["added"]);
+  assert.deepEqual(flowDiff.updated, ["keep"]);
+  assert.deepEqual(flowDiff.kept, []);
   assert.deepEqual(flowDiff.removed, ["drop"]);
   assert.equal(flowDiff.would_delete, true);
 

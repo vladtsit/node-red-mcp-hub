@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.1
+
+### Fixed
+
+- `trigger_inject` failed every real call with `UPSTREAM_INVALID_RESPONSE`
+  because Node-RED's `POST /inject/:id` replies with a plain-text `"OK"`
+  body, not JSON, and the gateway rejected any non-JSON response body.
+- `create_subflow` always returned HTTP 400: Node-RED's `POST /flow` cannot
+  create a subflow (it always wraps payloads as a `"tab"` and rejects
+  nested `"tab"`/`"subflow"` nodes). It now appends the subflow definition
+  to the full flows document and deploys it via `POST /flows`.
+- `preview_flow_change` (full-flow mode) never reported a changed node as
+  `updated`, always classifying it as `kept`. It now deep-compares node
+  content to distinguish the two.
+
 ## 0.4.0
 
 ### Added

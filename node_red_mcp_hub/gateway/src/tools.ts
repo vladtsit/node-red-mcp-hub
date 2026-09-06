@@ -142,7 +142,7 @@ export function registerTools(server: McpServer, config: GatewayConfig, runtime:
       out: Array.from({ length: outputs }, (_, index) => ({ x: 300, y: 40 + index * 60, wires: [], id: randomBytes(8).toString("hex") })),
       env: env ?? [],
     };
-    return call("create_subflow", server_id, (client) => client.createFlow(flow), true);
+    return call("create_subflow", server_id, (client) => client.createSubflow(flow), true, id);
   });
 }
 
