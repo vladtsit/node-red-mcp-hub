@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3
+
+### Fixed
+
+- `update_flow`/`delete_flow` now check `expected_rev` before taking a
+  pre-write backup, instead of after, so a stale revision is rejected
+  without wasting (or failing on) a backup write.
+- Fixed a CI-only test failure caused by a hardcoded default backup path.
+
 ## 0.4.2
 
 ### Fixed

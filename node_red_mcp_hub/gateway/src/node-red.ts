@@ -354,6 +354,10 @@ export class NodeRedClient {
       throw new UpstreamError(`Expected revision "${expectedRev}" but Node-RED is currently at "${document.rev ?? "unknown"}"; someone else may have changed flows. Re-read before writing.`, 409, false, "REV_CONFLICT");
     }
   }
+  /** Exposed so callers can reject a stale expected_rev before doing other write side effects (e.g. taking a pre-write backup). */
+  async checkExpectedRev(expectedRev: string): Promise<void> {
+    await this.assertExpectedRev(expectedRev);
+  }
   async createFlow(flow: unknown) {
     await this.validateTabWrite(flow);
     const result = await this.request("/flow", "POST", flow, undefined, true);

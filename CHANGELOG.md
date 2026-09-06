@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.3 - 2026-09-07
+
+### Fixed
+
+- CI was red on every push: `update_flow`/`delete_flow` took their pre-write
+  backup before checking `expected_rev`, so a stale-revision write wasted a
+  backup write (and, if the backup destination wasn't writable, surfaced a
+  misleading `BACKUP_FAILED` instead of `REV_CONFLICT`). `expected_rev` is
+  now checked first via a `precheck` step, before any backup is attempted.
+- The `create_subflow` test relied on the default `/data/backups` path,
+  which isn't writable on the GitHub Actions runner; it now uses an
+  isolated temp backup directory like the other write-path tests.
+
 ## 0.4.2 - 2026-09-07
 
 ### Fixed

@@ -453,10 +453,14 @@ test("create_subflow appends a subflow definition to the full flows document and
   }));
   t.after(target.close);
   const secret = "e".repeat(64);
-  const gateway = await start(createGateway(parseConfig({
+  const backupDir = await mkdtemp(join(tmpdir(), "node-red-mcp-create-subflow-"));
+  t.after(() => rm(backupDir, { recursive: true, force: true }));
+  const config = parseConfig({
     mcp_path_secret: secret, read_only: false,
     servers: [{ id: "target", name: "Target", url: target.url, auth_mode: "none", read_only: false }],
-  })));
+  });
+  config.backupDir = backupDir;
+  const gateway = await start(createGateway(config));
   t.after(gateway.close);
   const client = await mcp(gateway.url, secret);
   t.after(() => client.close());
