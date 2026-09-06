@@ -149,6 +149,13 @@ calling `create_flow`, `update_flow`, `delete_flow`, or `deploy_flows`. This is
 guidance surfaced to the connecting agent, not a technical restriction enforced
 by the hub; `read_only` remains the actual access control.
 
+The instructions also call out a specific, easy-to-get-wrong node property:
+`wires` must be an array of arrays, one per output port (e.g. `[["targetId"]]`
+for a single output wired to one target, `[]` for none). A flattened
+`["targetId"]` is accepted by Node-RED without error, but the source node
+fires while nothing downstream ever receives a message — this fails
+completely silently with no error anywhere.
+
 `deploy_flows` needs the `rev` returned by `get_flows` and passes it straight
 to Node-RED. A stale revision is returned as Node-RED's HTTP 409; the hub never
 forces or retries a deploy. Individual-flow operations use Node-RED's native

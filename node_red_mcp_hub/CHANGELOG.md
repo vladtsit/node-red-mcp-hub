@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.6
+
+### Added
+
+- Agent instructions and write-tool descriptions now also warn that a node's
+  `wires` must be an array of arrays (one per output port), since a flattened
+  array is accepted without error but silently drops all messages to that
+  node's targets.
+
 ## 0.3.5
 
 ### Added

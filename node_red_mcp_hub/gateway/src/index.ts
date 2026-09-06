@@ -51,7 +51,16 @@ When developing or modifying flows:
 - When adding a node meant only for manual testing, use an inject node with
   "once": false and no "repeat"/"crontab" so it never fires on its own.
 - create_flow/update_flow already redeploy the modified flow automatically;
-  no extra deploy step is needed after them.`;
+  no extra deploy step is needed after them.
+- A node's "wires" property MUST be an array of arrays: one inner array per
+  output port, each containing the target node ids for that port, e.g.
+  [["<targetId>"]] for a single-output node wired to one target, or [] for no
+  outputs. A flattened ["<targetId>"] is invalid and fails silently: Node-RED
+  iterates it as individual characters of the id string instead of real
+  targets, so the source node still fires but nothing downstream ever
+  receives a message and no error is shown. Always verify this shape (and
+  the shape of any generated JSON in general) before calling create_flow or
+  update_flow.`;
 
 function createMcpServer(config: GatewayConfig, runtime: GatewayRuntime): McpServer {
   const mcp = new McpServer({ name: "node-red-mcp-hub", version: APP_VERSION }, { instructions: AGENT_INSTRUCTIONS });

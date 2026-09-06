@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.6 - 2026-09-06
+
+### Added
+
+- The MCP server `instructions` and each write tool's description now also
+  warn that a node's `wires` property must be an array of arrays, one per
+  output port (e.g. `[["targetId"]]`), not a flattened array. A flattened
+  `wires` value is accepted by Node-RED without any error, but the source
+  node fires while nothing downstream ever receives a message — discovered
+  live this session when a manually-built test node exhibited exactly this
+  silent failure.
+
 ## 0.3.5 - 2026-09-06
 
 ### Added
