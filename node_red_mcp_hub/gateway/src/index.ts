@@ -115,11 +115,28 @@ After writing
   been applied. Read the flow first to establish the actual state.
 - deploy_flows needs the "rev" from get_flows; a stale rev returns HTTP 409.
   Re-read and re-apply rather than trying to force it.
+- update_flow and delete_flow also accept an optional expected_rev (from
+  get_flow's or get_flows' "rev"): if flows changed since you read them,
+  the write is rejected with REV_CONFLICT instead of silently clobbering a
+  concurrent change.
+- If a write succeeds but its automatic redeploy fails, the error code is
+  REDEPLOY_FAILED: the node/tab change was saved but may not be running yet.
+  Re-read the flow to confirm state and retry only deploy_flows, not the
+  original write.
 
 Subflows and other MCP primitives
 - create_subflow creates only an empty subflow container (in/out ports, no
   internal nodes). Add internal nodes with patch_flow/update_flow scoped to
   the returned subflow id, then update_flow again to wire the in/out ports.
+- trigger_inject fires one inject node's input event immediately, the same
+  as clicking it in the editor, so a flow can be exercised end-to-end without
+  asking the user to click it; an optional override_props lets you replace
+  its configured payload/topic for that one trigger only.
+- get_context reads a node/flow/global context store value for debugging
+  runtime state; context may contain arbitrary and possibly sensitive data.
+- list_backups lists the pre-write backups this hub has retained for a
+  server (filenames/timestamps/sizes only, not their content), useful after
+  a REDEPLOY_FAILED or unexpected write to see what was captured.
 - Flows are also exposed as MCP resources (flow://{server_id}/{flow_id}), and
   add_inject_debug_pair/diagnose_silent_failure prompt templates are
   available for common authoring and troubleshooting tasks.`;

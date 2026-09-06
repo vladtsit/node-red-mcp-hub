@@ -11,7 +11,7 @@ RUN npm run build && npm prune --omit=dev
 
 FROM ghcr.io/home-assistant/base:3.24-2026.08.0@sha256:93ef607824e3f27e868f11b10938283a98bf880ed57bcf8eaa81c6c2d521f6f5
 
-ARG BUILD_VERSION=0.3.9
+ARG BUILD_VERSION=0.4.0
 ARG BUILD_ARCH=amd64
 ENV NODE_RED_MCP_HUB_VERSION=${BUILD_VERSION}
 LABEL io.hass.name="Node-RED MCP Hub" \

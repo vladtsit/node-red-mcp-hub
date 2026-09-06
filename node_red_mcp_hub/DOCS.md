@@ -40,6 +40,7 @@ redact_secrets: true
 backup_before_write: true
 backup_retain: 20
 backup_max_age_days: 0
+backup_max_size_mb: 0
 disabled_tools: ''
 home_assistant_node_red:
   enabled: true
@@ -201,6 +202,38 @@ internal nodes; add those afterward with `patch_flow` or `update_flow` scoped
 to the returned subflow ID, then wire the `in`/`out` ports to those nodes with
 a follow-up `update_flow`.
 
+`update_flow` and `delete_flow` accept an optional `expected_rev` (the `rev`
+from `get_flow`/`get_flows`): if flows changed since that read, the write is
+rejected with a `REV_CONFLICT` error instead of silently overwriting a
+concurrent change. If a write itself succeeds but its automatic redeploy
+fails, the error code is `REDEPLOY_FAILED`: the change was saved but may not
+be running yet, and the response names the pre-write backup file if one was
+taken.
+
+`preview_flow_change` is a read-only dry run for a would-be `update_flow`
+(pass `flow`) or `patch_flow` (pass `patch`) call against the current tab. It
+never writes anything and returns the added/updated/removed node IDs so an
+agent (or the user) can confirm the exact effect, especially to catch an
+accidental deletion, before calling the real write tool. It is always
+available, even when `read_only: true`.
+
+`trigger_inject` fires one inject node's `input` event immediately, the same
+as clicking it in the Node-RED editor, letting a flow be exercised end-to-end
+without the user needing to click it manually. An optional `override_props`
+replaces that node's configured payload/topic for that one trigger only,
+using Node-RED's own property-override format. It is gated by the same
+`read_only` settings as other write tools, but does not create a pre-write
+backup since it does not change any flow definition.
+
+`get_context` reads a Node-RED `global`, `flow`, or `node` scoped context
+store value — useful for confirming runtime state while diagnosing a flow.
+Context can hold arbitrary values and may itself be sensitive.
+
+`list_backups` lists the pre-write backup snapshots retained for a server
+(filename, originating tool, and size only — never their content), so an
+agent or the user can see what was captured after a `REDEPLOY_FAILED` or an
+unexpected write outcome.
+
 ## MCP resources and prompts
 
 Each configured flow tab and subflow is also exposed as an MCP resource under
@@ -220,8 +253,18 @@ the write if the backup fails. At most `backup_retain` snapshots are kept per
 server. Set `backup_max_age_days` above `0` to additionally prune snapshots
 older than that many days, even if fewer than `backup_retain` remain; the
 default `0` disables age-based pruning and only count-based retention applies.
+Set `backup_max_size_mb` above `0` to additionally prune the oldest snapshots
+once a server's retained total exceeds that size budget; the snapshot just
+written is never pruned by this rule, even if it alone exceeds the budget. The
+default `0` disables size-based pruning.
 These files are private but sensitive and are intended for deliberate
 manual recovery, not automatic rollback.
+
+Every write tool call also appends a line to a private JSON-lines audit log
+(`/data/audit.log` by default, overridable with the `AUDIT_LOG_PATH`
+environment variable) recording the timestamp, server, tool, outcome, and
+any pre-write backup filename. Audit logging failures never block or fail
+the write itself.
 
 If the network fails or a write times out after it may have reached Node-RED,
 the structured error marks the outcome as unknown. Do not retry automatically—

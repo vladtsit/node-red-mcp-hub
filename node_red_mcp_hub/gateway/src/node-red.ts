@@ -98,6 +98,8 @@ function flowPathSegment(id: string): string {
 export class NodeRedClient {
   #token?: CachedToken;
   #tokenRefresh?: Promise<string>;
+  #flowsCache?: { at: number; value: Promise<unknown> };
+  static readonly FLOWS_CACHE_TTL_MS = 1_500;
 
   constructor(readonly target: TargetConfig) {}
 
@@ -212,10 +214,27 @@ export class NodeRedClient {
     return result.empty ? { ok: true } : result.json;
   }
 
-  private getFlowsRaw() { return this.request("/flows", "GET", undefined, { "Node-RED-API-Version": "v2" }); }
-  getFlowsForBackup() { return this.getFlowsRaw(); }
+  private getFlowsRaw(bypassCache = false) {
+    if (!bypassCache && this.#flowsCache && Date.now() - this.#flowsCache.at < NodeRedClient.FLOWS_CACHE_TTL_MS) {
+      return this.#flowsCache.value;
+    }
+    const promise = this.request("/flows", "GET", undefined, { "Node-RED-API-Version": "v2" });
+    this.#flowsCache = { at: Date.now(), value: promise };
+    promise.catch(() => { this.#flowsCache = undefined; });
+    return promise;
+  }
+  private invalidateFlowsCache() { this.#flowsCache = undefined; }
+  /** Backups must reflect the exact pre-write state, never a cached copy. */
+  getFlowsForBackup() { return this.getFlowsRaw(true); }
   async getFlows(redactSecrets = true) { return safeFlowRead(await this.getFlowsRaw(), redactSecrets); }
-  async getFlow(id: string, redactSecrets = true) { return safeFlowRead(await this.request(`/flow/${flowPathSegment(id)}`), redactSecrets); }
+  async getFlow(id: string, redactSecrets = true) {
+    const [flow, document] = await Promise.all([
+      this.request(`/flow/${flowPathSegment(id)}`),
+      this.getFlowsRaw().then(flowDocument).catch(() => undefined),
+    ]);
+    const safe = safeFlowRead(flow, redactSecrets) as Record<string, unknown>;
+    return document?.rev ? { ...safe, rev: document.rev } : safe;
+  }
   async listFlows() {
     const document = flowDocument(await this.getFlowsRaw());
     const containers = document.flows.filter((item) => item.type === "tab" || item.type === "subflow");
@@ -250,6 +269,19 @@ export class NodeRedClient {
     const document = flowDocument(await this.getFlowsRaw());
     return new Set(document.flows.map((node) => (typeof node.id === "string" ? node.id : undefined)).filter((id): id is string => !!id));
   }
+  /** Resolves installed node types from get_installed_modules; returns undefined (skip check) if that call fails. */
+  private async getKnownNodeTypes(): Promise<Set<string> | undefined> {
+    try {
+      const modules = await this.getInstalledModules();
+      if (!Array.isArray(modules)) return undefined;
+      const types = new Set<string>();
+      for (const entry of modules) {
+        if (!isPlainObject(entry) || entry.enabled === false) continue;
+        if (Array.isArray(entry.types)) for (const type of entry.types) if (typeof type === "string") types.add(type);
+      }
+      return types;
+    } catch { return undefined; }
+  }
   private collectNodesForTabPayload(flow: unknown): Record<string, unknown>[] {
     if (!isPlainObject(flow)) return [];
     const nodes = Array.isArray(flow.nodes) ? flow.nodes : [];
@@ -261,14 +293,19 @@ export class NodeRedClient {
   }
   private async validateTabWrite(flow: unknown, tabId?: string): Promise<void> {
     const nodes = this.collectNodesForTabPayload(flow);
-    const knownIds = this.hasWireTargets(nodes) ? await this.getAllNodeIds() : undefined;
-    const issues = [...findRedactedLeaks(flow), ...validateNodes(nodes, { tabId, knownIds })].filter((issue) => issue.level === "error");
+    const needsKnownIds = this.hasWireTargets(nodes) || nodes.some((node) => typeof node.type === "string" && node.type.startsWith("subflow:"));
+    const [knownIds, knownTypes] = await Promise.all([
+      needsKnownIds ? this.getAllNodeIds() : Promise.resolve(undefined),
+      this.getKnownNodeTypes(),
+    ]);
+    const issues = [...findRedactedLeaks(flow), ...validateNodes(nodes, { tabId, knownIds, knownTypes })].filter((issue) => issue.level === "error");
     if (issues.length) throw new FlowValidationError(issues.map((issue) => issue.message));
   }
-  private validateDeployPayload(flows: unknown): void {
+  private async validateDeployPayload(flows: unknown): Promise<void> {
     const nodes = Array.isArray(flows) ? flows.filter(isPlainObject) : [];
     const knownIds = new Set(nodes.map((node) => (typeof node.id === "string" ? node.id : undefined)).filter((id): id is string => !!id));
-    const issues = [...findRedactedLeaks(flows), ...validateNodes(nodes, { knownIds, allowContainerTypes: true })].filter((issue) => issue.level === "error");
+    const knownTypes = await this.getKnownNodeTypes();
+    const issues = [...findRedactedLeaks(flows), ...validateNodes(nodes, { knownIds, knownTypes, allowContainerTypes: true })].filter((issue) => issue.level === "error");
     if (issues.length) throw new FlowValidationError(issues.map((issue) => issue.message));
   }
   /**
@@ -281,26 +318,49 @@ export class NodeRedClient {
    * actually start, without restarting the whole runtime like a full deploy.
    */
   private async redeployModifiedFlows() {
-    const current = flowDocument(await this.getFlowsRaw());
+    const current = flowDocument(await this.getFlowsRaw(true));
     if (!current.rev) return;
     await this.request("/flows", "POST", { flows: current.flows, rev: current.rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": "flows" }, true);
+  }
+  /** A saved-but-not-redeployed flow must be reported distinctly from an ordinary write failure. */
+  private async completeWrite(writeResult: unknown): Promise<unknown> {
+    this.invalidateFlowsCache();
+    try { await this.redeployModifiedFlows(); }
+    catch (caught) {
+      const detail = caught instanceof Error ? caught.message : "unknown error";
+      const id = isPlainObject(writeResult) && typeof writeResult.id === "string" ? writeResult.id : "unknown";
+      throw new UpstreamError(`Flow "${id}" was saved but the follow-up redeploy failed, so new or changed nodes may not be running yet: ${detail}. Re-read the flow to confirm its actual state and retry only the redeploy (e.g. deploy_flows), not the original write.`, undefined, true, "REDEPLOY_FAILED", false);
+    }
+    return writeResult;
+  }
+  private async assertExpectedRev(expectedRev: string): Promise<void> {
+    const document = flowDocument(await this.getFlowsRaw(true));
+    if (document.rev !== expectedRev) {
+      throw new UpstreamError(`Expected revision "${expectedRev}" but Node-RED is currently at "${document.rev ?? "unknown"}"; someone else may have changed flows. Re-read before writing.`, 409, false, "REV_CONFLICT");
+    }
   }
   async createFlow(flow: unknown) {
     await this.validateTabWrite(flow);
     const result = await this.request("/flow", "POST", flow, undefined, true);
-    await this.redeployModifiedFlows();
-    return result;
+    return this.completeWrite(result);
   }
-  async updateFlow(id: string, flow: unknown) {
+  async updateFlow(id: string, flow: unknown, expectedRev?: string) {
     await this.validateTabWrite(flow, id);
+    if (expectedRev !== undefined) await this.assertExpectedRev(expectedRev);
     const result = await this.request(`/flow/${flowPathSegment(id)}`, "PUT", flow, undefined, true);
-    await this.redeployModifiedFlows();
+    return this.completeWrite(result);
+  }
+  async deleteFlow(id: string, expectedRev?: string) {
+    if (expectedRev !== undefined) await this.assertExpectedRev(expectedRev);
+    const result = await this.request(`/flow/${flowPathSegment(id)}`, "DELETE", undefined, undefined, true);
+    this.invalidateFlowsCache();
     return result;
   }
-  deleteFlow(id: string) { return this.request(`/flow/${flowPathSegment(id)}`, "DELETE", undefined, undefined, true); }
-  deployFlows(flows: unknown, rev: string, deploymentType: "nodes" | "flows" | "full") {
-    this.validateDeployPayload(flows);
-    return this.request("/flows", "POST", { flows, rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": deploymentType }, true);
+  async deployFlows(flows: unknown, rev: string, deploymentType: "nodes" | "flows" | "full") {
+    await this.validateDeployPayload(flows);
+    const result = await this.request("/flows", "POST", { flows, rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": deploymentType }, true);
+    this.invalidateFlowsCache();
+    return result;
   }
   private async getFlowRaw(id: string): Promise<Record<string, unknown>> {
     const data = await this.request(`/flow/${flowPathSegment(id)}`);
@@ -360,6 +420,70 @@ export class NodeRedClient {
       node_count_before: currentNodes.length + currentConfigs.length,
       node_count_after: nodesById.size + configsById.size,
     };
+  }
+  /**
+   * Dry-run diff against the current tab: never writes anything. Accepts
+   * either a full replacement "flow" (update_flow style, flagging any node
+   * present now but missing from the payload as an accidental deletion) or a
+   * "patch" (patch_flow style add/update/remove lists).
+   */
+  async previewFlowChange(id: string, input: { flow?: unknown; patch?: { add?: unknown[]; update?: unknown[]; remove?: string[] } }) {
+    const current = await this.getFlowRaw(id);
+    const currentNodes = Array.isArray(current.nodes) ? current.nodes.filter(isPlainObject) : [];
+    const currentConfigs = Array.isArray(current.configs) ? current.configs.filter(isPlainObject) : [];
+    const currentIds = new Set([...currentNodes, ...currentConfigs].map((node) => String(node.id)));
+
+    if (input.flow !== undefined) {
+      const payloadNodes = this.collectNodesForTabPayload(input.flow);
+      const payloadIds = new Set(payloadNodes.map((node) => String(node.id)));
+      const added = [...payloadIds].filter((nodeId) => !currentIds.has(nodeId));
+      const removed = [...currentIds].filter((nodeId) => !payloadIds.has(nodeId));
+      const kept = [...payloadIds].filter((nodeId) => currentIds.has(nodeId));
+      const issues = [...findRedactedLeaks(input.flow), ...validateNodes(payloadNodes, { tabId: id })].map((issue) => issue.message);
+      return { mode: "flow" as const, added, kept, removed, would_delete: removed.length > 0, issues, node_count_before: currentIds.size, node_count_after: payloadIds.size };
+    }
+
+    const patch = input.patch ?? {};
+    const notFound: string[] = [];
+    const removed: string[] = [];
+    for (const removeId of patch.remove ?? []) (currentIds.has(removeId) ? removed : notFound).push(removeId);
+    const updated: string[] = [];
+    for (const item of patch.update ?? []) {
+      if (isPlainObject(item) && typeof item.id === "string") (currentIds.has(item.id) ? updated : notFound).push(item.id);
+    }
+    const added: string[] = [];
+    const conflicts: string[] = [];
+    for (const item of patch.add ?? []) {
+      const nodeId = isPlainObject(item) && typeof item.id === "string" ? item.id : undefined;
+      if (nodeId && currentIds.has(nodeId)) conflicts.push(nodeId);
+      else added.push(nodeId ?? "(auto-generated id)");
+    }
+    return {
+      mode: "patch" as const, added, updated, removed, not_found: notFound, add_id_conflicts: conflicts,
+      node_count_before: currentIds.size,
+      node_count_after: currentIds.size + added.length - removed.length,
+    };
+  }
+  /**
+   * POST /inject/:id. With no override, replays the node's own configured
+   * payload/topic. __user_inject_props__ is Node-RED's own override
+   * convention (an array of {p,v,vt} property descriptors) confirmed from
+   * the inject node's admin route and its "input" handler.
+   */
+  triggerInject(id: string, overrideProps?: { p: string; v: string; vt: string }[]) {
+    const body = overrideProps?.length ? { __user_inject_props__: overrideProps } : undefined;
+    return this.request(`/inject/${flowPathSegment(id)}`, "POST", body);
+  }
+  /** GET /context/:scope[/:id][/key]; scope "global" has no id, "flow"/"node" require one. */
+  async getContext(scope: "global" | "flow" | "node", id?: string, key?: string, store?: string, keysOnly?: boolean) {
+    if (scope !== "global" && !id) throw new UpstreamError(`Context scope "${scope}" requires an id`, undefined, false, "INVALID_ARGUMENT");
+    const base = scope === "global" ? "/context/global" : `/context/${scope}/${flowPathSegment(id!)}`;
+    const path = key ? `${base}/${key.split("/").map(encodeURIComponent).join("/")}` : base;
+    const params = new URLSearchParams();
+    if (store) params.set("store", store);
+    if (keysOnly) params.set("keysOnly", "true");
+    const query = params.toString();
+    return safeJson(await this.request(`${path}${query ? `?${query}` : ""}`));
   }
   async getSettings() {
     const settings = await this.request("/settings");

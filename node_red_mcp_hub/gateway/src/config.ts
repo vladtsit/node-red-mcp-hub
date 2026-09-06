@@ -30,7 +30,9 @@ export interface GatewayConfig {
   backupBeforeWrite: boolean;
   backupRetain: number;
   backupMaxAgeDays: number;
+  backupMaxSizeMb: number;
   backupDir: string;
+  auditLogPath: string;
   disabledTools: Set<string>;
   servers: Map<string, TargetConfig>;
 }
@@ -44,6 +46,7 @@ type RawOptions = {
   backup_before_write?: unknown;
   backup_retain?: unknown;
   backup_max_age_days?: unknown;
+  backup_max_size_mb?: unknown;
   disabled_tools?: unknown;
 };
 
@@ -63,7 +66,8 @@ const AUTH_MODES = new Set<AuthMode>(["credentials", "bearer", "basic", "none"])
 const TOOL_NAMES = new Set([
   "list_servers", "check_servers", "list_flows", "search_nodes", "get_flows", "get_flow",
   "get_settings", "get_diagnostics", "get_flow_state", "get_installed_modules", "create_flow",
-  "update_flow", "delete_flow", "deploy_flows",
+  "update_flow", "delete_flow", "deploy_flows", "patch_flow", "create_subflow", "trigger_inject",
+  "preview_flow_change", "list_backups", "get_context",
 ]);
 
 function fail(message: string): never {
@@ -328,7 +332,9 @@ export function parseConfig(input: RawOptions): GatewayConfig {
     backupBeforeWrite: boolOption(input.backup_before_write, "backup_before_write", true),
     backupRetain: intOption(input.backup_retain, "backup_retain", 20, 1, 1000),
     backupMaxAgeDays: intOption(input.backup_max_age_days, "backup_max_age_days", 0, 0, 3650),
+    backupMaxSizeMb: intOption(input.backup_max_size_mb, "backup_max_size_mb", 0, 0, 10_000),
     backupDir: process.env.BACKUP_DIR ?? DEFAULT_BACKUP_DIR,
+    auditLogPath: process.env.AUDIT_LOG_PATH ?? "/data/audit.log",
     disabledTools: toolSet(input.disabled_tools, "disabled_tools"),
     servers,
   };

@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.4.0 - 2026-09-06
+
+### Added
+
+- Added `trigger_inject` to fire an inject node's `input` event on demand,
+  with an optional `override_props` to replace its configured payload/topic
+  for that one trigger, using Node-RED's own property-override format.
+- Added `get_context` to read Node-RED's `global`/`flow`/`node` context
+  stores.
+- Added `preview_flow_change`, a read-only dry run of a would-be
+  `update_flow`/`patch_flow` change, returning added/updated/removed node IDs
+  without writing anything.
+- Added `list_backups` to list retained pre-write backup snapshots for a
+  server (filename/tool/size only, never their content).
+- `update_flow` and `delete_flow` now accept an optional `expected_rev` for
+  optimistic-concurrency conflict detection, rejecting a stale write with
+  `REV_CONFLICT`.
+- A write that saves successfully but whose automatic post-write redeploy
+  fails is now reported distinctly as `REDEPLOY_FAILED`, naming any pre-write
+  backup taken, instead of looking like an ordinary write failure.
+- `create_flow`, `update_flow`, `patch_flow`, and `deploy_flows` now validate
+  that every node `type` is installed (per `get_installed_modules`) or is a
+  subflow instance referencing an existing subflow, rejecting the write
+  outright if not.
+- `get_flow` now also returns the current Node-RED `rev`.
+- Every write tool call now appends an entry to a private JSON-lines audit
+  log (`/data/audit.log` by default, overridable via `AUDIT_LOG_PATH`)
+  recording timestamp, server, tool, outcome, and any backup filename.
+- Backups can now also be pruned by total retained size via the new
+  `backup_max_size_mb` option, in addition to the existing count- and
+  age-based retention.
+- Flow reads are now served from a short-lived (~1.5s) in-memory cache to
+  reduce redundant upstream calls from bursts of concurrent reads;
+  pre-write backups and post-write redeploys always bypass this cache.
+
 ## 0.3.9 - 2026-09-06
 
 ### Added

@@ -2,6 +2,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
+import { AuditLog } from "./audit.js";
 import { BackupError, BackupManager } from "./backup.js";
 import { MAX_IN_FLIGHT, type GatewayConfig } from "./config.js";
 import { FlowValidationError, NodeRedClient, UpstreamError } from "./node-red.js";
@@ -29,11 +30,13 @@ class GatewayBusyError extends Error {}
 export class GatewayRuntime {
   readonly clients: Map<string, NodeRedClient>;
   readonly backups: BackupManager;
+  readonly audit: AuditLog;
   #active = 0;
 
   constructor(readonly config: GatewayConfig) {
     this.clients = new Map([...config.servers.entries()].map(([id, target]) => [id, new NodeRedClient(target)]));
-    this.backups = new BackupManager(config.backupDir, config.backupRetain, config.backupMaxAgeDays);
+    this.backups = new BackupManager(config.backupDir, config.backupRetain, config.backupMaxAgeDays, config.backupMaxSizeMb);
+    this.audit = new AuditLog(config.auditLogPath);
   }
 
   async run<T>(action: () => Promise<T> | T): Promise<T> {
@@ -54,22 +57,26 @@ export function registerTools(server: McpServer, config: GatewayConfig, runtime:
     (server.registerTool as unknown as (n: string, c: Registration, h: Handler) => void)(name, registration, handler);
   };
 
-  async function call(toolName: string, id: string, action: Action, write = false) {
+  async function call(toolName: string, id: string, action: Action, write = false, flowIdForAudit?: string) {
     const target = config.servers.get(id);
     if (!target) return error("UNKNOWN_SERVER", "Unknown server_id");
     if (target.disabledTools.has(toolName)) return error("TOOL_DISABLED", `${toolName} is disabled for this server`);
     if (write && (config.readOnly || target.readOnly)) return error("READ_ONLY", "Writes are disabled by read_only configuration");
+    let backupFile: string | undefined;
     try {
-      return result(await runtime.run(async () => {
+      const value = await runtime.run(async () => {
         const client = runtime.clients.get(id)!;
-        if (write && config.backupBeforeWrite) await runtime.backups.capture(target, client, toolName);
+        if (write && config.backupBeforeWrite) backupFile = await runtime.backups.capture(target, client, toolName);
         return action(client);
-      }));
+      });
+      if (write) await runtime.audit.record({ server_id: id, tool: toolName, outcome: "ok", flow_id: flowIdForAudit, backup_file: backupFile });
+      return result(value);
     } catch (caught) {
+      if (write) await runtime.audit.record({ server_id: id, tool: toolName, outcome: "error", flow_id: flowIdForAudit, backup_file: backupFile, detail: caught instanceof Error ? caught.message : "unknown error" });
       if (caught instanceof GatewayBusyError) return error("BUSY", "Gateway is busy; retry later", { retryable: true });
       if (caught instanceof BackupError) return error("BACKUP_FAILED", caught.message, { suggestions: ["Resolve backup storage access or disable backup_before_write explicitly."] });
       if (caught instanceof FlowValidationError) return error("VALIDATION_FAILED", caught.message, { suggestions: caught.issues });
-      if (caught instanceof UpstreamError) return error(caught.code, caught.message, { status: caught.status, outcomeUnknown: caught.outcomeUnknown, retryable: caught.retryable });
+      if (caught instanceof UpstreamError) return error(caught.code, caught.message, { status: caught.status, outcomeUnknown: caught.outcomeUnknown, retryable: caught.retryable, suggestions: caught.code === "REDEPLOY_FAILED" && backupFile ? [`Pre-write backup saved as ${backupFile}.`] : undefined });
       return error("INTERNAL_ERROR", "Unexpected gateway error");
     }
   }
@@ -97,15 +104,36 @@ export function registerTools(server: McpServer, config: GatewayConfig, runtime:
   register("get_flow_state", { title: "Get Runtime State", description: "Get the Node-RED runtime flow state.", inputSchema: { server_id: serverId }, annotations: readAnnotations }, ({ server_id }) => call("get_flow_state", server_id, (client) => client.getFlowState()));
   register("get_installed_modules", { title: "Get Installed Modules", description: "Get installed Node-RED modules.", inputSchema: { server_id: serverId }, annotations: readAnnotations }, ({ server_id }) => call("get_installed_modules", server_id, (client) => client.getInstalledModules()));
 
-  if (config.readOnly) return;
-  register("create_flow", { title: "Create Flow", description: "Immediately create one native Node-RED flow after taking a configured pre-write backup. Confirm the exact change with the user before calling this. Each node's wires must be an array of arrays (one per output port, e.g. [[\"targetId\"]]); a flattened [\"targetId\"] fails silently.", inputSchema: { server_id: serverId, flow: z.record(z.unknown()) }, annotations: createAnnotations }, ({ server_id, flow }) => call("create_flow", server_id, (client) => client.createFlow(flow), true));
-  register("update_flow", { title: "Update Flow", description: "Immediately update one native Node-RED flow after taking a configured pre-write backup. flow.id must equal flow_id. Confirm the exact change with the user before calling this. This REPLACES the whole tab: get_flow first and send every node back, since any omitted node is deleted, and preserve the separate configs array. Each node's wires must be an array of arrays (one per output port, e.g. [[\"targetId\"]]); a flattened [\"targetId\"] fails silently. Never send back a \"[redacted]\" value from a read; omit that property instead.", inputSchema: { server_id: serverId, flow_id: flowId, flow: z.record(z.unknown()) }, annotations: writeAnnotations }, ({ server_id, flow_id, flow }) => {
-    if (flow.id !== flow_id) return error("INVALID_ARGUMENT", "flow.id must match flow_id");
-    return call("update_flow", server_id, (client) => client.updateFlow(flow_id, flow), true);
+  register("get_context", { title: "Get Context", description: "Read Node-RED global/flow/node context store values. Context can hold arbitrary runtime state and may contain sensitive values.", inputSchema: { server_id: serverId, scope: z.enum(["global", "flow", "node"]), id: z.string().min(1).max(256).optional(), key: z.string().min(1).max(256).optional(), store: z.string().min(1).max(64).optional(), keys_only: z.boolean().default(false) }, annotations: readAnnotations }, ({ server_id, scope, id, key, store, keys_only }) => {
+    if (scope !== "global" && !id) return error("INVALID_ARGUMENT", `Context scope "${scope}" requires id`);
+    return call("get_context", server_id, (client) => client.getContext(scope, id, key, store, keys_only));
   });
-  register("patch_flow", { title: "Patch Flow", description: "Add, update, or remove specific nodes within one flow tab, without needing to resend the whole tab. Existing nodes not mentioned are preserved automatically, and stored secrets are never round-tripped through you. Confirm the exact change with the user before calling this. Not for adding groups or subflow definitions; use update_flow for those.", inputSchema: { server_id: serverId, flow_id: flowId, add: z.array(z.record(z.unknown())).max(50).optional(), update: z.array(z.record(z.unknown())).max(50).optional(), remove: z.array(z.string().min(1)).max(200).optional() }, annotations: writeAnnotations }, ({ server_id, flow_id, add, update, remove }) => call("patch_flow", server_id, (client) => client.patchFlow(flow_id, { add, update, remove }), true));
-  register("delete_flow", { title: "Delete Flow", description: "Immediately delete one native Node-RED flow after taking a configured pre-write backup. Confirm with the user, naming the exact flow, before calling this; deletions are destructive.", inputSchema: { server_id: serverId, flow_id: flowId }, annotations: writeAnnotations }, ({ server_id, flow_id }) => call("delete_flow", server_id, (client) => client.deleteFlow(flow_id), true));
+
+  register("list_backups", { title: "List Backups", description: "List retained pre-write backup snapshots for a server, newest first. Does not return their content.", inputSchema: { server_id: serverId }, annotations: readAnnotations }, async ({ server_id }) => {
+    const target = config.servers.get(server_id);
+    if (!target) return error("UNKNOWN_SERVER", "Unknown server_id");
+    try { return result(await runtime.run(() => runtime.backups.list(target))); }
+    catch (caught) {
+      if (caught instanceof GatewayBusyError) return error("BUSY", "Gateway is busy; retry later", { retryable: true });
+      return error("INTERNAL_ERROR", "Unexpected gateway error");
+    }
+  });
+
+  register("preview_flow_change", { title: "Preview Flow Change", description: "Dry-run diff of a would-be update_flow (full \"flow\") or patch_flow (\"patch\" add/update/remove) against the current tab. Writes nothing; use this to confirm the exact change with the user before calling update_flow/patch_flow, especially to catch accidental deletions.", inputSchema: { server_id: serverId, flow_id: flowId, flow: z.record(z.unknown()).optional(), patch: z.object({ add: z.array(z.record(z.unknown())).max(50).optional(), update: z.array(z.record(z.unknown())).max(50).optional(), remove: z.array(z.string().min(1)).max(200).optional() }).optional() }, annotations: readAnnotations }, ({ server_id, flow_id, flow, patch }) => {
+    if (!flow === !patch) return error("INVALID_ARGUMENT", 'Provide exactly one of "flow" or "patch"');
+    return call("preview_flow_change", server_id, (client) => client.previewFlowChange(flow_id, { flow, patch }));
+  });
+
+  if (config.readOnly) return;
+  register("create_flow", { title: "Create Flow", description: "Immediately create one native Node-RED flow after taking a configured pre-write backup. Confirm the exact change with the user before calling this. Each node's wires must be an array of arrays (one per output port, e.g. [[\"targetId\"]]); a flattened [\"targetId\"] fails silently.", inputSchema: { server_id: serverId, flow: z.record(z.unknown()) }, annotations: createAnnotations }, ({ server_id, flow }) => call("create_flow", server_id, (client) => client.createFlow(flow), true, typeof flow.id === "string" ? flow.id : undefined));
+  register("update_flow", { title: "Update Flow", description: "Immediately update one native Node-RED flow after taking a configured pre-write backup. flow.id must equal flow_id. Confirm the exact change with the user before calling this. This REPLACES the whole tab: get_flow first and send every node back, since any omitted node is deleted, and preserve the separate configs array. Each node's wires must be an array of arrays (one per output port, e.g. [[\"targetId\"]]); a flattened [\"targetId\"] fails silently. Never send back a \"[redacted]\" value from a read; omit that property instead. Optionally pass expected_rev (from get_flows) to reject the write if flows changed since you read them.", inputSchema: { server_id: serverId, flow_id: flowId, flow: z.record(z.unknown()), expected_rev: z.string().min(1).optional() }, annotations: writeAnnotations }, ({ server_id, flow_id, flow, expected_rev }) => {
+    if (flow.id !== flow_id) return error("INVALID_ARGUMENT", "flow.id must match flow_id");
+    return call("update_flow", server_id, (client) => client.updateFlow(flow_id, flow, expected_rev), true, flow_id);
+  });
+  register("patch_flow", { title: "Patch Flow", description: "Add, update, or remove specific nodes within one flow tab, without needing to resend the whole tab. Existing nodes not mentioned are preserved automatically, and stored secrets are never round-tripped through you. Confirm the exact change with the user before calling this. Not for adding groups or subflow definitions; use update_flow for those.", inputSchema: { server_id: serverId, flow_id: flowId, add: z.array(z.record(z.unknown())).max(50).optional(), update: z.array(z.record(z.unknown())).max(50).optional(), remove: z.array(z.string().min(1)).max(200).optional() }, annotations: writeAnnotations }, ({ server_id, flow_id, add, update, remove }) => call("patch_flow", server_id, (client) => client.patchFlow(flow_id, { add, update, remove }), true, flow_id));
+  register("delete_flow", { title: "Delete Flow", description: "Immediately delete one native Node-RED flow after taking a configured pre-write backup. Confirm with the user, naming the exact flow, before calling this; deletions are destructive. Optionally pass expected_rev (from get_flows) to reject the delete if flows changed since you read them.", inputSchema: { server_id: serverId, flow_id: flowId, expected_rev: z.string().min(1).optional() }, annotations: writeAnnotations }, ({ server_id, flow_id, expected_rev }) => call("delete_flow", server_id, (client) => client.deleteFlow(flow_id, expected_rev), true, flow_id));
   register("deploy_flows", { title: "Deploy Full Flow Graph", description: "Immediately deploy a full Node-RED graph with revision protection after taking a configured pre-write backup. Confirm the exact change with the user before calling this. Each node's wires must be an array of arrays (one per output port, e.g. [[\"targetId\"]]); a flattened [\"targetId\"] fails silently.", inputSchema: { server_id: serverId, flows: z.array(z.record(z.unknown())), rev: z.string().min(1), deployment_type: deploymentType }, annotations: writeAnnotations }, ({ server_id, flows, rev, deployment_type }) => call("deploy_flows", server_id, (client) => client.deployFlows(flows, rev, deployment_type), true));
+  register("trigger_inject", { title: "Trigger Inject Node", description: "Immediately fire one inject node's \"input\" event, the same as clicking its button in the editor, so a flow can be tested end-to-end without asking the user to click it. Confirm with the user before calling this if the flow has side effects (e.g. controls a device). Optional override_props replaces the node's own configured payload/topic for this one trigger only, using Node-RED's own {p,v,vt} property-override format.", inputSchema: { server_id: serverId, node_id: z.string().min(1).max(256), override_props: z.array(z.object({ p: z.string().min(1), v: z.string(), vt: z.string().min(1) })).max(20).optional() }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } }, ({ server_id, node_id, override_props }) => call("trigger_inject", server_id, (client) => client.triggerInject(node_id, override_props), false, node_id));
   register("create_subflow", { title: "Create Subflow", description: "Immediately create an empty native Node-RED subflow container (not its internal nodes) after taking a configured pre-write backup. Confirm with the user before calling this. Add internal nodes afterward with patch_flow/update_flow scoped to the returned subflow id, then update_flow again to wire the in/out ports to those nodes.", inputSchema: { server_id: serverId, name: z.string().min(1).max(256), category: z.string().min(1).max(64).optional(), info: z.string().max(10_000).optional(), inputs: z.number().int().min(0).max(10).default(0), outputs: z.number().int().min(0).max(10).default(1), env: z.array(z.object({ name: z.string().min(1), type: z.string().min(1), value: z.string() })).max(50).optional() }, annotations: createAnnotations }, ({ server_id, name, category, info, inputs, outputs, env }) => {
     const id = randomBytes(8).toString("hex");
     const flow = {

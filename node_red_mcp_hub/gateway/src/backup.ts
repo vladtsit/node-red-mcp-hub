@@ -7,9 +7,15 @@ import type { NodeRedClient } from "./node-red.js";
 export class BackupError extends Error {}
 
 export class BackupManager {
-  constructor(private readonly directory: string, private readonly retain: number, private readonly maxAgeDays = 0) {}
+  constructor(
+    private readonly directory: string,
+    private readonly retain: number,
+    private readonly maxAgeDays = 0,
+    private readonly maxSizeMb = 0,
+  ) {}
 
-  async capture(target: TargetConfig, client: NodeRedClient, tool: string): Promise<void> {
+  /** Returns the created backup's filename, for audit logging and troubleshooting. */
+  async capture(target: TargetConfig, client: NodeRedClient, tool: string): Promise<string> {
     const targetDir = join(this.directory, target.id);
     const stamp = new Date().toISOString().replaceAll(":", "-");
     const name = `${stamp}-${tool}-${randomUUID()}.json`;
@@ -31,17 +37,49 @@ export class BackupManager {
           }
         }
       }
+      if (this.maxSizeMb > 0) {
+        const budget = this.maxSizeMb * 1024 * 1024;
+        const survivors = files.filter((item) => !stale.includes(item));
+        let total = 0;
+        for (const item of survivors) {
+          try { total += (await stat(join(targetDir, item))).size; }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            continue;
+          }
+          // Never delete the backup just written, even if it alone exceeds the budget.
+          if (total > budget && item !== name) stale.push(item);
+        }
+      }
       await Promise.all(stale.map(async (item) => {
         try { await unlink(join(targetDir, item)); }
         catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
       }));
+      return name;
     } catch (error) {
       try { await unlink(temporaryPath); } catch {}
       const detail = error instanceof Error ? error.message : "unknown error";
       throw new BackupError(`Could not create pre-write backup: ${detail}`);
     }
+  }
+
+  /** Read-only listing of retained backups for a server, newest first. */
+  async list(target: TargetConfig): Promise<{ name: string; tool?: string; created_at?: string; size_bytes: number }[]> {
+    const targetDir = join(this.directory, target.id);
+    let entries: string[];
+    try { entries = await readdir(targetDir); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const files = entries.filter((item) => item.endsWith(".json")).sort().reverse();
+    return Promise.all(files.map(async (name) => {
+      const info = await stat(join(targetDir, name));
+      const match = name.match(/^(.*)-([a-z_]+)-[0-9a-f-]{36}\.json$/);
+      return { name, tool: match?.[2], created_at: match?.[1], size_bytes: info.size };
+    }));
   }
 }
 

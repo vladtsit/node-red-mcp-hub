@@ -20,6 +20,9 @@ configuration:
   backup_max_age_days:
     name: Backup max age (days)
     description: Additionally prunes pre-write snapshots older than this many days. 0 disables age-based pruning.
+  backup_max_size_mb:
+    name: Backup size budget (MB)
+    description: Additionally prunes the oldest pre-write snapshots once a server's retained total exceeds this size. 0 disables size-based pruning.
   disabled_tools:
     name: Globally disabled tools
     description: Optional comma-separated MCP tool names to omit from discovery.

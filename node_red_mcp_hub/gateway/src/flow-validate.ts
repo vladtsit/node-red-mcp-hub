@@ -19,7 +19,7 @@ export function findRedactedLeaks(payload: unknown): ValidationIssue[] {
     : [];
 }
 
-export function validateNodes(nodes: Record<string, unknown>[], options: { tabId?: string; knownIds?: Set<string>; allowContainerTypes?: boolean } = {}): ValidationIssue[] {
+export function validateNodes(nodes: Record<string, unknown>[], options: { tabId?: string; knownIds?: Set<string>; knownTypes?: Set<string>; allowContainerTypes?: boolean } = {}): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const seenIds = new Set<string>();
   const localIds = new Set(nodes.map((node) => (typeof node.id === "string" ? node.id : undefined)).filter((id): id is string => !!id));
@@ -31,6 +31,14 @@ export function validateNodes(nodes: Record<string, unknown>[], options: { tabId
     seenIds.add(id);
     if (!options.allowContainerTypes && (node.type === "tab" || node.type === "subflow")) {
       issues.push({ level: "error", message: `Node "${id}" has type "${node.type}", which is not valid inside a flow's nodes/configs list; Node-RED will reject the whole write.` });
+    }
+    if (options.knownTypes && typeof node.type === "string" && node.type !== "tab" && node.type !== "subflow") {
+      const subflowId = node.type.startsWith("subflow:") ? node.type.slice("subflow:".length) : undefined;
+      const recognized = options.knownTypes.has(node.type)
+        || (subflowId !== undefined && ((options.knownIds?.has(subflowId) ?? false) || localIds.has(subflowId)));
+      if (!recognized) {
+        issues.push({ level: "error", message: `Node "${id}" has type "${node.type}", which is not present in get_installed_modules and is not a subflow instance referencing an existing subflow id. Confirm the node type is installed before writing.` });
+      }
     }
     if (options.tabId && typeof node.z === "string" && node.z !== options.tabId) {
       issues.push({ level: "error", message: `Node "${id}" has z="${node.z}" but is being written to tab "${options.tabId}".` });
