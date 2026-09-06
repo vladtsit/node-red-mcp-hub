@@ -18,6 +18,15 @@ updates:
         dependency-type: production
       development-dependencies:
         dependency-type: development
+    ignore:
+      # zod v4 breaks tools.ts (e.g. z.record() signature change); requires a deliberate code migration, not a routine bump.
+      - dependency-name: zod
+        update-types: ["version-update:semver-major"]
+      # typescript v7 + @types/node v26 together break the build (global Buffer/process/node: types stop resolving); needs a deliberate tsconfig migration.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
