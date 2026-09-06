@@ -9,6 +9,7 @@ Planned URL: http://192.168.3.57:51844/private_<secret>, with URL-only access fo
 - [Simple architecture and API tool mapping](BUILDING_A_MULTI_NODE_RED_MCP_HOME_ASSISTANT_APP.md)
 - [Developer instructions](DEVELOPER_GUIDE.md)
 - [What was simplified](ARCHITECTURE_REVIEW.md)
+- [Release notes](CHANGELOG.md)
 
 No database, flow history or approval workflow. Node-RED owns the flows; the hub forwards requests.
 
@@ -62,17 +63,15 @@ secret value as `auto`.
 mcp_path_secret: auto
 read_only: true
 home_assistant_node_red:
-  enabled: true
-  token: YOUR_HOME_ASSISTANT_LONG_LIVED_ACCESS_TOKEN
-  # url: https://node-red.example.internal:1880
+  enabled: false
 servers:
-  - id: home
-    name: Home Node-RED
+  - id: home-node-red
+    name: Home Assistant Node-RED
     url: http://192.168.3.57:1880
-    auth_mode: credentials
-    username: CHANGE_ME
-    password: CHANGE_ME
-    read_only: false
+    auth_mode: basic
+    username: YOUR_HOME_ASSISTANT_USERNAME
+    password: YOUR_HOME_ASSISTANT_PASSWORD
+    read_only: true
 ```
 
 Leave `mcp_path_secret: auto` on first start. The app generates 32 random bytes,
@@ -96,30 +95,34 @@ The global `read_only: true` hides every write tool. A server-level
 `read_only: true` remains protective after you enable global writes, so it is a
 useful way to keep selected Node-RED instances permanently read-only.
 
-#### Home Assistant Node-RED app discovery
+#### Home Assistant Node-RED app
 
-`home_assistant_node_red.enabled` is on by default. Create a long-lived access
-token from the Home Assistant administrator account that manages Node-RED, then
-set it as `home_assistant_node_red.token`. The hub finds the locally installed
-Node-RED app through the Supervisor and adds it as the read-only
-`home_assistant_node_red` target. It never reads the Node-RED app's options,
-passwords, or credential secret. Manually configured `servers` remain available
-alongside this target.
+The official Home Assistant Node-RED app authenticates its Admin API through
+the Home Assistant proxy with **HTTP Basic authentication**. Configure it as a
+regular server with `auth_mode: basic`, using the Home Assistant account
+username and password that can open Node-RED. Do **not** use a Home Assistant
+long-lived access token: it is valid for Home Assistant's REST API but is not
+accepted by the Node-RED proxy.
 
-The Node-RED app's direct URL can use custom TLS, a reverse proxy, or a
-non-default port. Set `home_assistant_node_red.url` to its exact Admin API URL
-when the discovered `http://` address is unsuitable; for example,
-`https://node-red.example.internal:1880`. The token is still required because
-the Home Assistant Node-RED app authenticates its editor through Home Assistant.
+Set `home_assistant_node_red.enabled: false` for this setup. The optional
+automatic discovery target currently authenticates with a bearer token and is
+therefore not suitable for the official Home Assistant Node-RED app. It does
+not affect manually configured `servers`.
 
 For a simple trusted-LAN setup, expose the Node-RED app's direct port as `1880`
 and disable SSL in its own configuration, then use:
 
 ```yaml
 home_assistant_node_red:
-  enabled: true
-  token: YOUR_HOME_ASSISTANT_LONG_LIVED_ACCESS_TOKEN
-  url: http://192.168.3.57:1880
+  enabled: false
+servers:
+  - id: home-node-red
+    name: Home Assistant Node-RED
+    url: http://192.168.3.57:1880
+    auth_mode: basic
+    username: YOUR_HOME_ASSISTANT_USERNAME
+    password: YOUR_HOME_ASSISTANT_PASSWORD
+    read_only: true
 ```
 
 `http://192.168.3.57:8123/app/a0d7b954_nodered` is the Home Assistant frontend

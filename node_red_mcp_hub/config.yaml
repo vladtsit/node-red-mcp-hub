@@ -22,7 +22,9 @@ options:
   mcp_url: ''
   read_only: true
   home_assistant_node_red:
-    enabled: true
+    # The official Home Assistant Node-RED app requires a manually configured
+    # HTTP Basic target in `servers`; keep incompatible bearer discovery off.
+    enabled: false
   servers: []
 schema:
   mcp_path_secret: password
@@ -30,7 +32,8 @@ schema:
   read_only: bool
   home_assistant_node_red:
     enabled: bool
-    # A Home Assistant long-lived access token used by the Node-RED auth proxy.
+    # Optional legacy discovery; it is not compatible with the official app's
+    # HTTP Basic Admin API proxy.
     token: password?
     # Optional exact Admin API URL, for custom TLS, reverse proxy, or port setups.
     url: url?
