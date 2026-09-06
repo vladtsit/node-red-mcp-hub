@@ -4,6 +4,7 @@ set -eu
 runtime_options=/run/node-red-mcp-hub/options.json
 path_secret="$(bashio::config 'mcp_path_secret')"
 generated_secret=false
+umask 077
 
 # The Supervisor configuration schema cannot provide a random default. Persist
 # one through its supported API so the secret survives restarts and is visible
@@ -15,10 +16,19 @@ if [ -z "${path_secret}" ] || [ "${path_secret}" = "null" ] || [ "${path_secret}
     bashio::log.info 'Generated and saved the MCP path secret. Copy it from the add-on Configuration tab.'
 fi
 
-# Supervisor owns /data/options.json. Copy only that configuration to a private,
-# service-owned runtime file instead of weakening its permissions.
-install -d -m 0700 -o gateway -g gateway /run/node-red-mcp-hub
-install -m 0600 -o gateway -g gateway /data/options.json "${runtime_options}"
+published_port="$(bashio::addon.port 51844)"
+published_url="$(MCP_HUB_PATH_SECRET="${path_secret}" MCP_HUB_PORT="${published_port}" node /app/dist/mcp-url.js 2>/dev/null || true)"
+if [ -n "${published_url}" ]; then
+    bashio::addon.option 'mcp_url' "${published_url}"
+else
+    bashio::addon.option 'mcp_url' ''
+fi
+
+# Supervisor owns /data/options.json. Copy it into a private runtime file. The
+# restricted Home Assistant app environment does not permit ownership changes,
+# so this remains root-owned and the AppArmor-confined gateway runs as root.
+mkdir -p /run/node-red-mcp-hub
+cp /data/options.json "${runtime_options}"
 
 # Use the new secret immediately even if the Supervisor has not yet refreshed
 # /data/options.json after bashio::addon.option returned.
@@ -30,8 +40,6 @@ if [ "${generated_secret}" = true ]; then
         options.mcp_path_secret = process.env.MCP_HUB_PATH_SECRET;
         writeFileSync(file, JSON.stringify(options));
     ' "${runtime_options}"
-    chown gateway:gateway "${runtime_options}"
-    chmod 0600 "${runtime_options}"
 fi
 
-exec s6-setuidgid gateway node /app/dist/index.js
+exec node /app/dist/index.js

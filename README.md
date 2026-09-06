@@ -77,8 +77,9 @@ servers:
 
 Leave `mcp_path_secret: auto` on first start. The app generates 32 random bytes,
 saves the resulting 64-character hexadecimal secret back to its Configuration
-tab, and never prints it in the log. After the app starts, copy that saved value
-into your MCP client. You can instead provide your own value from
+tab, and never prints it in the log. After the app starts, copy the generated
+full `mcp_url` value from the same tab into your MCP client. You can instead
+provide your own value from
 `openssl rand -hex 32`. Keep it in a password manager: it is part of the MCP
 endpoint URL and grants access to the hub.
 

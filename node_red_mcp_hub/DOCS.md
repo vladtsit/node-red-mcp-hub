@@ -12,7 +12,8 @@ credentials, and write tools take effect immediately.
    add-on's Network options.
 2. Leave `mcp_path_secret` as `auto` for the first start. The app generates and
    saves a 64-character hexadecimal secret in the Configuration tab without
-   writing it to the log. You can instead provide a value from
+   writing it to the log. It also shows the complete copyable `mcp_url` in that
+   tab. You can instead provide a value from
    `openssl rand -hex 32`.
 3. Add one to twenty Node-RED Admin API targets. Use the direct Admin URL,
    including its admin-root prefix when it has one; do not use a Home Assistant
@@ -114,6 +115,9 @@ Assistant backups for backup and restore.
 ## Operational notes
 
 - Target failures never make `/healthz` fail; each target is isolated.
+- The gateway runs as the app's root user inside its custom AppArmor profile;
+  Home Assistant's restricted app environment does not permit the ownership
+  changes needed to drop to a separate Unix user.
 - The gateway has a 15-second outbound timeout, 10 MiB request/response limits,
   20 in-flight call limit, TLS certificate verification, and disabled redirects.
 - It uses no database and persists no target tokens. Add-on logs intentionally

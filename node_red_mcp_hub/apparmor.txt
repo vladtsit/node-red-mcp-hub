@@ -8,10 +8,6 @@ profile node_red_mcp_hub flags=(attach_disconnected,mediate_deleted) {
   signal (send) set=(kill,term,int,hup,cont),
   network inet stream,
   network inet6 stream,
-  capability chown,
-  capability setuid,
-  capability setgid,
-
   # S6 Overlay and Bashio required by the Home Assistant base image.
   /init ix,
   /bin/** ix,

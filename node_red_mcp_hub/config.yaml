@@ -1,7 +1,7 @@
 name: Node-RED MCP Hub
 slug: node_red_mcp_hub
 description: Secure multi-server MCP gateway for managing Node-RED flows
-version: 0.2.0
+version: 0.2.2
 arch:
   - amd64
   - aarch64
@@ -18,12 +18,15 @@ options:
   # "auto" is replaced with a random 32-byte secret at first start and saved
   # back to the add-on configuration.
   mcp_path_secret: auto
+  # A generated display value. The app overwrites it on every start.
+  mcp_url: ''
   read_only: true
   home_assistant_node_red:
     enabled: true
   servers: []
 schema:
   mcp_path_secret: password
+  mcp_url: str
   read_only: bool
   home_assistant_node_red:
     enabled: bool

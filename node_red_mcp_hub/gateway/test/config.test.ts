@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { discoverHomeAssistantNodeRed, parseConfig } from "../src/config.js";
+import { publishedMcpUrl } from "../src/mcp-url.js";
 
 const options = {
   mcp_path_secret: "a".repeat(64), read_only: true,
@@ -60,4 +61,11 @@ test("uses an explicit local HTTP URL without requiring Supervisor discovery", a
   });
   const config = parseConfig(configured);
   assert.equal(config.servers.get("home_assistant_node_red")?.baseUrl.toString(), "http://192.168.3.57:1880/");
+});
+
+test("builds a copyable MCP URL from the primary Home Assistant LAN address", async () => {
+  const url = await publishedMcpUrl("b".repeat(64), "51844", "supervisor-token", async () => new Response(JSON.stringify({
+    data: { interfaces: [{ primary: false, ipv4: { address: ["10.0.0.2/24"] } }, { primary: true, ipv4: { address: ["192.168.3.57/24"] } }] },
+  })));
+  assert.equal(url, `http://192.168.3.57:51844/private_${"b".repeat(64)}`);
 });
