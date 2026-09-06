@@ -1,5 +1,5 @@
-# Home Assistant add-on profile. The gateway requires no host, Docker, hardware,
-# Supervisor, or Home Assistant API access.
+# Home Assistant add-on profile. The gateway uses the Supervisor API only to
+# discover the local Node-RED app; it has no host, Docker, or hardware access.
 #include <tunables/global>
 profile node_red_mcp_hub flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>

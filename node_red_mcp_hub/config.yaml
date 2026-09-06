@@ -1,7 +1,7 @@
 name: Node-RED MCP Hub
 slug: node_red_mcp_hub
 description: Secure multi-server MCP gateway for managing Node-RED flows
-version: 0.1.0
+version: 0.2.0
 arch:
   - amd64
   - aarch64
@@ -15,12 +15,22 @@ ports_description:
   51844/tcp: MCP HTTP endpoint
 watchdog: http://[HOST]:[PORT:51844]/healthz
 options:
-  mcp_path_secret: null
+  # "auto" is replaced with a random 32-byte secret at first start and saved
+  # back to the add-on configuration.
+  mcp_path_secret: auto
   read_only: true
+  home_assistant_node_red:
+    enabled: true
   servers: []
 schema:
   mcp_path_secret: password
   read_only: bool
+  home_assistant_node_red:
+    enabled: bool
+    # A Home Assistant long-lived access token used by the Node-RED auth proxy.
+    token: password?
+    # Optional exact Admin API URL, for custom TLS, reverse proxy, or port setups.
+    url: url?
   servers:
     - id: str
       name: str
@@ -30,3 +40,4 @@ schema:
       password: password?
       token: password?
       read_only: bool?
+hassio_api: true

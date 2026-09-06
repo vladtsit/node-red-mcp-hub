@@ -55,11 +55,16 @@ Node-RED instance.
 ### Configure the app
 
 Open the installed app, select the **Configuration** tab, and use this as a
-starting point. Replace every placeholder before saving.
+starting point. Replace every placeholder before saving; leave the first-start
+secret value as `auto`.
 
 ```yaml
-mcp_path_secret: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+mcp_path_secret: auto
 read_only: true
+home_assistant_node_red:
+  enabled: true
+  token: YOUR_HOME_ASSISTANT_LONG_LIVED_ACCESS_TOKEN
+  # url: https://node-red.example.internal:1880
 servers:
   - id: home
     name: Home Node-RED
@@ -70,10 +75,12 @@ servers:
     read_only: false
 ```
 
-Generate `mcp_path_secret` as 32 random bytes encoded as 64 hexadecimal
-characters. On macOS/Linux, `openssl rand -hex 32` produces a valid value. Keep
-it in a password manager: it is part of the MCP endpoint URL and grants access
-to the hub.
+Leave `mcp_path_secret: auto` on first start. The app generates 32 random bytes,
+saves the resulting 64-character hexadecimal secret back to its Configuration
+tab, and never prints it in the log. After the app starts, copy that saved value
+into your MCP client. You can instead provide your own value from
+`openssl rand -hex 32`. Keep it in a password manager: it is part of the MCP
+endpoint URL and grants access to the hub.
 
 Choose `auth_mode` for each server:
 
@@ -87,6 +94,35 @@ Choose `auth_mode` for each server:
 The global `read_only: true` hides every write tool. A server-level
 `read_only: true` remains protective after you enable global writes, so it is a
 useful way to keep selected Node-RED instances permanently read-only.
+
+#### Home Assistant Node-RED app discovery
+
+`home_assistant_node_red.enabled` is on by default. Create a long-lived access
+token from the Home Assistant administrator account that manages Node-RED, then
+set it as `home_assistant_node_red.token`. The hub finds the locally installed
+Node-RED app through the Supervisor and adds it as the read-only
+`home_assistant_node_red` target. It never reads the Node-RED app's options,
+passwords, or credential secret. Manually configured `servers` remain available
+alongside this target.
+
+The Node-RED app's direct URL can use custom TLS, a reverse proxy, or a
+non-default port. Set `home_assistant_node_red.url` to its exact Admin API URL
+when the discovered `http://` address is unsuitable; for example,
+`https://node-red.example.internal:1880`. The token is still required because
+the Home Assistant Node-RED app authenticates its editor through Home Assistant.
+
+For a simple trusted-LAN setup, expose the Node-RED app's direct port as `1880`
+and disable SSL in its own configuration, then use:
+
+```yaml
+home_assistant_node_red:
+  enabled: true
+  token: YOUR_HOME_ASSISTANT_LONG_LIVED_ACCESS_TOKEN
+  url: http://192.168.3.57:1880
+```
+
+`http://192.168.3.57:8123/app/a0d7b954_nodered` is the Home Assistant frontend
+route, not the Node-RED Admin API, and must not be used as `url`.
 
 Select **Save**, then open the **Info** tab and select **Start**. The app starts
 only when the configuration has one to twenty valid servers and a valid path

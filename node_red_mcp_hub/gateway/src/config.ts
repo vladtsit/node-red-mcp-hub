@@ -4,6 +4,7 @@ export const PORT = 51844;
 export const MAX_BODY_BYTES = 10 * 1024 * 1024;
 export const REQUEST_TIMEOUT_MS = 15_000;
 export const MAX_IN_FLIGHT = 20;
+const SUPERVISOR_DISCOVERY_TIMEOUT_MS = 5_000;
 
 export type AuthMode = "credentials" | "bearer" | "basic" | "none";
 
@@ -29,7 +30,16 @@ type RawOptions = {
   mcp_path_secret?: unknown;
   read_only?: unknown;
   servers?: unknown;
+  home_assistant_node_red?: unknown;
 };
+
+type LocalNodeRedOptions = {
+  enabled: boolean;
+  token?: string;
+  url?: string;
+};
+
+type SupervisorFetch = (input: string, init?: RequestInit) => Promise<Response>;
 
 const ID = /^[a-z][a-z0-9_-]{0,31}$/;
 const SECRET = /^[a-f0-9]{64}$/i;
@@ -61,6 +71,129 @@ function targetUrl(value: string, field: string): URL {
   }
   url.pathname = url.pathname.replace(/\/+$/, "") || "";
   return url;
+}
+
+function optionalString(value: unknown, field: string): string | undefined {
+  return stringField(value, field, false);
+}
+
+function localNodeRedOptions(input: RawOptions): LocalNodeRedOptions {
+  if (input.home_assistant_node_red === undefined || input.home_assistant_node_red === null) {
+    return { enabled: true };
+  }
+  if (typeof input.home_assistant_node_red !== "object" || Array.isArray(input.home_assistant_node_red)) {
+    fail("home_assistant_node_red must be an object");
+  }
+  const value = input.home_assistant_node_red as Record<string, unknown>;
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") {
+    fail("home_assistant_node_red.enabled must be a boolean");
+  }
+  return {
+    enabled: value.enabled !== false,
+    token: optionalString(value.token, "home_assistant_node_red.token"),
+    url: optionalString(value.url, "home_assistant_node_red.url"),
+  };
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function supervisorData(value: unknown): Record<string, unknown> | undefined {
+  const result = record(value);
+  return record(result?.data) ?? result;
+}
+
+function localNodeRedCandidate(addons: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(addons)) return undefined;
+  const candidates = addons.filter(record).filter((addon) => {
+    const name = typeof addon.name === "string" ? addon.name.toLowerCase() : "";
+    const slug = typeof addon.slug === "string" ? addon.slug.toLowerCase() : "";
+    return name === "node-red" || slug === "nodered" || slug.endsWith("_nodered");
+  });
+  return candidates.find((addon) => addon.state === "started") ?? candidates[0];
+}
+
+function discoveredUrl(info: Record<string, unknown>): string | undefined {
+  const address = typeof info.ip_address === "string" ? info.ip_address : undefined;
+  if (!address) return undefined;
+  const network = record(info.network);
+  const configuredPort = network?.["80/tcp"];
+  const port = typeof configuredPort === "number" || typeof configuredPort === "string"
+    ? Number(configuredPort)
+    : info.host_network === true ? 1880 : 80;
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
+  return `http://${address}:${port}`;
+}
+
+async function supervisorJson(path: string, token: string, request: SupervisorFetch): Promise<Record<string, unknown> | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SUPERVISOR_DISCOVERY_TIMEOUT_MS);
+  try {
+    const response = await request(`http://supervisor${path}`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+      signal: controller.signal,
+      redirect: "error",
+    });
+    if (!response.ok) return undefined;
+    return supervisorData(await response.json());
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Add the official Home Assistant Node-RED app as a read-only target when it
+ * is available. A user-provided Home Assistant access token is deliberately
+ * required: the hub never reads another app's options or credentials.
+ */
+export async function discoverHomeAssistantNodeRed(
+  input: RawOptions,
+  request: SupervisorFetch = fetch,
+  supervisorToken = process.env.SUPERVISOR_TOKEN,
+): Promise<RawOptions> {
+  const local = localNodeRedOptions(input);
+  if (!local.enabled || !local.token) return input;
+  const manualServers = Array.isArray(input.servers) ? input.servers : [];
+  const ids = new Set(manualServers.flatMap((server) => {
+    const value = record(server);
+    return typeof value?.id === "string" ? [value.id] : [];
+  }));
+  if (ids.has("home_assistant_node_red") || manualServers.length >= 20) return input;
+
+  let baseUrl = local.url;
+  let name = "Home Assistant Node-RED";
+  if (!baseUrl) {
+    if (!supervisorToken) return input;
+    const addons = await supervisorJson("/addons", supervisorToken, request);
+    const addon = localNodeRedCandidate(addons?.addons);
+    const slug = typeof addon?.slug === "string" ? addon.slug : undefined;
+    if (!slug) return input;
+    const info = await supervisorJson(`/addons/${encodeURIComponent(slug)}/info`, supervisorToken, request);
+    if (!info) return input;
+    baseUrl = discoveredUrl(info);
+    if (typeof info.name === "string" && info.name) name = info.name;
+  }
+  if (!baseUrl) return input;
+
+  return {
+    ...input,
+    servers: [
+      ...manualServers,
+      {
+        id: "home_assistant_node_red",
+        name,
+        url: baseUrl,
+        auth_mode: "bearer",
+        token: local.token,
+        read_only: true,
+      },
+    ],
+  };
 }
 
 export function parseConfig(input: RawOptions): GatewayConfig {
@@ -106,5 +239,5 @@ export async function loadConfig(optionsPath = process.env.OPTIONS_PATH ?? "/run
     const detail = error instanceof Error ? error.message : "unknown error";
     throw new Error(`Could not load add-on options: ${detail}`);
   }
-  return parseConfig(input);
+  return parseConfig(await discoverHomeAssistantNodeRed(input));
 }
