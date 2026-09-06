@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.2 - 2026-09-07
+
+### Fixed
+
+- `trigger_inject` accepted any node ID and fired `.receive()` on it
+  regardless of type, matching Node-RED's own `POST /inject/:id` route
+  (which does not check node type either and returns 200 for any existing
+  node). The hub now looks up the target node's type first and rejects a
+  non-`inject` node with `INVALID_ARGUMENT` instead of silently poking an
+  arbitrary node. Unknown node IDs still fall through to Node-RED's own 404.
+
 ## 0.4.1 - 2026-09-06
 
 ### Fixed

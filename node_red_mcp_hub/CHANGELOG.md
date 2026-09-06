@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2
+
+### Fixed
+
+- `trigger_inject` fired `.receive()` on any existing node id regardless of
+  type (matching Node-RED's own route, which does the same). It now checks
+  the node's type first and rejects a non-`inject` target with
+  `INVALID_ARGUMENT`; unknown ids still fall through to a 404.
+
 ## 0.4.1
 
 ### Fixed

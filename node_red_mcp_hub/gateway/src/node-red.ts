@@ -506,8 +506,18 @@ export class NodeRedClient {
    * payload/topic. __user_inject_props__ is Node-RED's own override
    * convention (an array of {p,v,vt} property descriptors) confirmed from
    * the inject node's admin route and its "input" handler.
+   *
+   * Node-RED's own route does not check the node's type: it calls
+   * node.receive() on whatever node exists at that id and returns 200
+   * regardless, only 404ing for a truly unknown id. Reject non-inject
+   * targets here instead of silently poking an arbitrary node.
    */
-  triggerInject(id: string, overrideProps?: { p: string; v: string; vt: string }[]) {
+  async triggerInject(id: string, overrideProps?: { p: string; v: string; vt: string }[]) {
+    const document = flowDocument(await this.getFlowsRaw());
+    const node = document.flows.find((item) => item.id === id);
+    if (node && node.type !== "inject") {
+      throw new UpstreamError(`Node "${id}" is a "${node.type}" node, not "inject"; trigger_inject only fires inject nodes.`, undefined, false, "INVALID_ARGUMENT");
+    }
     const body = overrideProps?.length ? { __user_inject_props__: overrideProps } : undefined;
     return this.request(`/inject/${flowPathSegment(id)}`, "POST", body, undefined, false, false);
   }

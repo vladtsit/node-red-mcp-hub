@@ -503,13 +503,26 @@ test("/healthz exposes per-target status only when the path secret is supplied",
 
 test("trigger_inject fires an inject node with an optional property override", async (t) => {
   const seen: { path?: string; body?: unknown }[] = [];
+  const flows = [
+    { id: "tab-1", type: "tab", label: "Flow 1" },
+    { id: "inject-1", type: "inject", z: "tab-1" },
+    { id: "debug-1", type: "debug", z: "tab-1" },
+  ];
   const target = await start(createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
     seen.push({ path: request.url, body });
-    // Real Node-RED replies via res.sendStatus(200): a plain-text "OK" body, not JSON.
-    response.writeHead(200, { "content-type": "text/plain" }).end("OK");
+    if (request.url === "/flows" && request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows }));
+      return;
+    }
+    if (request.url?.startsWith("/inject/")) {
+      // Real Node-RED replies via res.sendStatus(200): a plain-text "OK" body, not JSON.
+      response.writeHead(200, { "content-type": "text/plain" }).end("OK");
+      return;
+    }
+    response.writeHead(404).end();
   }));
   t.after(target.close);
   const secret = "1".repeat(64);
@@ -522,11 +535,17 @@ test("trigger_inject fires an inject node with an optional property override", a
   t.after(() => client.close());
   const response = await client.callTool({ name: "trigger_inject", arguments: { server_id: "target", node_id: "inject-1" } });
   assert.equal(response.isError, undefined);
-  assert.deepEqual(seen[0], { path: "/inject/inject-1", body: undefined });
+  assert.deepEqual(seen.at(-1), { path: "/inject/inject-1", body: undefined });
 
   const withProps = await client.callTool({ name: "trigger_inject", arguments: { server_id: "target", node_id: "inject-1", override_props: [{ p: "payload", v: "hello", vt: "str" }] } });
   assert.equal(withProps.isError, undefined);
-  assert.deepEqual(seen[1], { path: "/inject/inject-1", body: { __user_inject_props__: [{ p: "payload", v: "hello", vt: "str" }] } });
+  assert.deepEqual(seen.at(-1), { path: "/inject/inject-1", body: { __user_inject_props__: [{ p: "payload", v: "hello", vt: "str" }] } });
+
+  // Node-RED's own route fires .receive() on any node id regardless of type; the hub must reject non-inject targets itself.
+  const nonInject = await client.callTool({ name: "trigger_inject", arguments: { server_id: "target", node_id: "debug-1" } });
+  assert.equal(nonInject.isError, true);
+  assert.match((nonInject.content as { text: string }[])[0].text, /INVALID_ARGUMENT/);
+  assert.ok(!seen.some((entry) => entry.path === "/inject/debug-1"), "must not call /inject for a non-inject node");
 });
 
 test("get_context reads global, flow, and node scoped context with query params", async (t) => {
