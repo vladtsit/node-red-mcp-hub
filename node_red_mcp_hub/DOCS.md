@@ -62,6 +62,8 @@ published host port, and falls back to the Supervisor-internal address and
 Node-RED's own port when no host port is published. It then authenticates the
 Admin API using HTTP Basic, because the Community app fronts Node-RED with an
 HTTP Basic proxy. Supervisor does not provide or replace the credentials.
+Discovery requires the `manager` Supervisor role to list and read other apps;
+this is granted automatically by the add-on manifest.
 
 Use `auth_mode: basic` for this app. `auth_mode: credentials` targets Node-RED's
 native `adminAuth` login and is rejected by that proxy. A Home Assistant

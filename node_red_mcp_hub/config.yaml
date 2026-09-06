@@ -1,7 +1,7 @@
 name: Node-RED MCP Hub
 slug: node_red_mcp_hub
 description: Secure multi-server MCP gateway for managing Node-RED flows
-version: 0.3.2
+version: 0.3.3
 arch:
   - amd64
   - aarch64
@@ -54,3 +54,7 @@ schema:
       read_only: bool?
       disabled_tools: str?
 hassio_api: true
+# "manager" is required to list and read other apps (GET /addons, GET
+# /addons/<slug>/info) for Node-RED auto-discovery; the "default" role can
+# only access this app's own Supervisor data.
+hassio_role: manager

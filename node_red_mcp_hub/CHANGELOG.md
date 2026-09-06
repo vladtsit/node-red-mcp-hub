@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3
+
+- Fixed Home Assistant Node-RED discovery failing with "could not find an
+  installed Node-RED app" because the add-on lacked the `manager` Supervisor
+  role needed to call `GET /addons`; the default role can only read the
+  add-on's own Supervisor data. Added `hassio_role: manager` to the manifest.
+
 ## 0.3.2
 
 - Fixed Home Assistant Node-RED discovery for host-networked add-ons: Docker

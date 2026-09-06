@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3 - 2026-09-06
+
+### Fixed
+
+- Home Assistant Node-RED discovery failed with "could not find an installed
+  Node-RED app" even with a correct `host_network` fallback, because the
+  add-on's Supervisor role (`default`) is not permitted to call `GET /addons`
+  to list other installed apps; only `manager` and `admin` roles can. Added
+  `hassio_role: manager` to `config.yaml` so discovery can enumerate apps.
+
 ## 0.3.2 - 2026-09-06
 
 ### Fixed
