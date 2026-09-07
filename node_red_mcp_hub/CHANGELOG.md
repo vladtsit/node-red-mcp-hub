@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.4
+
+### Fixed
+
+- `delete_flow` now deletes subflow definitions too. Node-RED's single-flow
+  delete route only indexes tabs and always 404s for a subflow id; the hub
+  now removes a subflow (and its internal nodes) via a full-flows-document
+  deploy instead, mirroring how `create_subflow` already has to add one.
+
 ## 0.4.3
 
 ### Fixed

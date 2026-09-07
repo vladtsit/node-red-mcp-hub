@@ -481,6 +481,46 @@ test("create_subflow appends a subflow definition to the full flows document and
   assert.ok((subflow.out as { id: string }[]).every((port) => typeof port.id === "string" && port.id.length > 0));
 });
 
+test("delete_flow removes a subflow definition (and its internal nodes) via the full flows document", async (t) => {
+  const seen: { method?: string; path?: string; body?: unknown }[] = [];
+  const existing = [
+    { id: "tab-1", type: "tab", label: "Flow 1" },
+    { id: "sf-1", type: "subflow", name: "My Subflow", in: [], out: [] },
+    { id: "sf-1-inner", type: "debug", z: "sf-1" },
+  ];
+  const target = await start(createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
+    seen.push({ method: request.method, path: request.url, body });
+    if (request.url === "/flows" && request.method === "GET") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r1", flows: existing })); return; }
+    if (request.url === "/flows" && request.method === "POST") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ rev: "r2" })); return; }
+    // DELETE /flow/:id (removeFlow) 404s for a subflow id since Node-RED only indexes tabs there; must never be called.
+    if (request.url === "/flow/sf-1" && request.method === "DELETE") { response.writeHead(404).end(); return; }
+    response.writeHead(404).end();
+  }));
+  t.after(target.close);
+  const secret = "1".repeat(64);
+  const backupDir = await mkdtemp(join(tmpdir(), "node-red-mcp-delete-subflow-"));
+  t.after(() => rm(backupDir, { recursive: true, force: true }));
+  const config = parseConfig({
+    mcp_path_secret: secret, read_only: false,
+    servers: [{ id: "target", name: "Target", url: target.url, auth_mode: "none", read_only: false }],
+  });
+  config.backupDir = backupDir;
+  const gateway = await start(createGateway(config));
+  t.after(gateway.close);
+  const client = await mcp(gateway.url, secret);
+  t.after(() => client.close());
+  const response = await client.callTool({ name: "delete_flow", arguments: { server_id: "target", flow_id: "sf-1" } });
+  assert.equal(response.isError, undefined);
+  const deployCall = seen.find((entry) => entry.method === "POST" && entry.path === "/flows");
+  assert.ok(deployCall, "expected a POST /flows deploy call, not DELETE /flow/sf-1");
+  const posted = deployCall!.body as { flows: Record<string, unknown>[]; rev: string };
+  assert.deepEqual(posted.flows.map((node) => node.id), ["tab-1"]);
+  assert.ok(!seen.some((entry) => entry.method === "DELETE"), "must not call DELETE /flow/:id for a subflow");
+});
+
 test("/healthz exposes per-target status only when the path secret is supplied", async (t) => {
   const target = await start(createServer((request, response) => {
     if (request.url === "/settings") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ version: "4.0.1" })); return; }
