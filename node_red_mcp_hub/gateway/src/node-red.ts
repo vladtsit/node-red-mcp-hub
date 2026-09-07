@@ -388,8 +388,23 @@ export class NodeRedClient {
     const result = await this.request(`/flow/${flowPathSegment(id)}`, "PUT", flow, undefined, true);
     return this.completeWrite(result);
   }
+  /**
+   * DELETE /flow/:id (removeFlow) only looks up activeFlowConfig.flows, which
+   * Node-RED keys by tab id alone; a subflow definition is never in that map,
+   * so the route always 404s for a subflow, the same structural gap as
+   * addFlow's tab-only POST /flow. Remove the subflow (and any internal
+   * nodes already added under it) via the full flows document instead.
+   */
   async deleteFlow(id: string, expectedRev?: string) {
     if (expectedRev !== undefined) await this.assertExpectedRev(expectedRev);
+    const document = flowDocument(await this.getFlowsRaw(true));
+    const node = document.flows.find((item) => item.id === id);
+    if (node && node.type === "subflow") {
+      const flows = document.flows.filter((item) => item.id !== id && item.z !== id);
+      await this.request("/flows", "POST", { flows, rev: document.rev }, { "Node-RED-API-Version": "v2", "Node-RED-Deployment-Type": "flows" }, true);
+      this.invalidateFlowsCache();
+      return { id };
+    }
     const result = await this.request(`/flow/${flowPathSegment(id)}`, "DELETE", undefined, undefined, true);
     this.invalidateFlowsCache();
     return result;

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.4 - 2026-09-07
+
+### Fixed
+
+- `delete_flow` could never delete a subflow: Node-RED's own `DELETE
+  /flow/:id` route (`removeFlow`) only looks up its tab-keyed flow map, so it
+  unconditionally 404s for a subflow id, matching the same structural gap
+  `create_subflow` already had to work around on the create side. The hub
+  now detects a subflow target and removes it (and any internal nodes
+  already added under it) via a full-flows-document deploy instead.
+
 ## 0.4.3 - 2026-09-07
 
 ### Fixed

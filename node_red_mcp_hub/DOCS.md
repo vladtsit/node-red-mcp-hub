@@ -202,6 +202,12 @@ internal nodes; add those afterward with `patch_flow` or `update_flow` scoped
 to the returned subflow ID, then wire the `in`/`out` ports to those nodes with
 a follow-up `update_flow`.
 
+`delete_flow` deletes both ordinary flow tabs and subflow definitions.
+Node-RED's own single-flow delete route only indexes tabs, so it always
+404s for a subflow id; the hub detects a subflow target and instead removes
+it (and any internal nodes already added under it) via a full-flows-document
+deploy, the same mechanism `create_subflow` uses to add one.
+
 `update_flow` and `delete_flow` accept an optional `expected_rev` (the `rev`
 from `get_flow`/`get_flows`): if flows changed since that read, the write is
 rejected with a `REV_CONFLICT` error instead of silently overwriting a
