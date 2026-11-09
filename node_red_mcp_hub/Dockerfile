@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Pinned multi-architecture Home Assistant Alpine base image.
-FROM ghcr.io/home-assistant/base:3.24-2026.08.0@sha256:93ef607824e3f27e868f11b10938283a98bf880ed57bcf8eaa81c6c2d521f6f5 AS builder
+FROM ghcr.io/home-assistant/base:3.24-2026.11.0@sha256:58422480a299b16b6ea376c2167463206d430619ed02b40cd687c8bd6875519e AS builder
 
 WORKDIR /build
 RUN apk add --no-cache nodejs npm
@@ -9,7 +9,7 @@ RUN --mount=type=cache,target=/root/.npm npm ci
 COPY gateway/ ./
 RUN npm run build && npm prune --omit=dev
 
-FROM ghcr.io/home-assistant/base:3.24-2026.08.0@sha256:93ef607824e3f27e868f11b10938283a98bf880ed57bcf8eaa81c6c2d521f6f5
+FROM ghcr.io/home-assistant/base:3.24-2026.11.0@sha256:58422480a299b16b6ea376c2167463206d430619ed02b40cd687c8bd6875519e
 
 ARG BUILD_VERSION=0.4.4
 ARG BUILD_ARCH=amd64
